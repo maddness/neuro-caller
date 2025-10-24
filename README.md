@@ -1,22 +1,23 @@
 # 🤖 Neuro-Caller
 
-AI-powered phone recruitment system for taxi services using OpenAI and Twilio.
+AI-powered phone recruitment system for taxi services using OpenAI Realtime API and Twilio.
 
 ## 📋 Описание
 
-Neuro-Caller - это автоматизированная система для телефонного рекрутинга водителей в такси-сервис. Система использует:
-- **OpenAI GPT-4** для генерации естественных разговорных ответов
-- **Twilio** для совершения телефонных звонков (поддержка российских номеров +7)
-- **Amazon Polly** (через Twilio) для синтеза речи на русском языке
+Neuro-Caller - это автоматизированная система для телефонного рекрутинга водителей в такси-сервис нового поколения. Система использует:
+- **OpenAI Realtime API** для мгновенных голосовых разговоров с минимальной задержкой
+- **Twilio Media Streams** для двунаправленной передачи аудио в реальном времени
+- **WebSocket** для прямой связи между Twilio и OpenAI без промежуточной обработки
 
 ## ✨ Возможности
 
-- ✅ Автоматические исходящие звонки на российские номера
-- ✅ Естественный диалог на русском языке
-- ✅ Контекстно-зависимые ответы с использованием GPT-4
-- ✅ Распознавание речи собеседника
-- ✅ Логирование всех разговоров
-- ✅ Webhook endpoints для интеграции с Twilio
+- ⚡ **Ультранизкая задержка** - прямой стрим аудио между Twilio и OpenAI
+- ✅ Автоматические исходящие звонки на российские номера (+7)
+- 🎙️ Естественный, живой диалог на русском языке
+- 🧠 Контекстно-зависимые ответы с использованием GPT-4o Realtime
+- 🔊 Нативное распознавание и синтез речи без конвертации в текст
+- 📊 Логирование всех разговоров и транскрипций
+- 🔄 Real-time audio streaming через WebSocket
 
 ## 🔧 Требования
 
@@ -85,25 +86,33 @@ TAXI_BRAND_NAME=Ваше Такси
 brew install ngrok  # macOS
 # или скачайте с https://ngrok.com/download
 
-# Запустите туннель
+# Запустите туннель для HTTP (порт 3000)
 ngrok http 3000
 ```
 
 Скопируйте HTTPS URL (например, `https://abc123.ngrok.io`) и укажите его в `BASE_URL` в `.env`.
 
-### 5. Запуск сервера
+**Важно**: Не добавляйте порт в BASE_URL, система автоматически настроит порты для HTTP (3000) и WebSocket (3001).
+
+### 5. Запуск серверов
+
+Система запускает два сервера одновременно:
+- **Flask HTTP сервер** (порт 3000) - для webhook'ов и API
+- **WebSocket сервер** (порт 3001) - для Media Streams
 
 ```bash
 # Активируйте виртуальное окружение
 source venv/bin/activate
 
-# Запустите сервер
+# Запустите оба сервера
 ./run_server.sh
 # или
-python src/app.py
+python start_servers.py
 ```
 
-Сервер запустится на `http://0.0.0.0:3000`
+Серверы запустятся:
+- HTTP: `http://0.0.0.0:3000`
+- WebSocket: `ws://0.0.0.0:3001`
 
 ### 6. Совершение звонка
 
@@ -121,21 +130,26 @@ python src/scripts/make_call.py +79991234567
 neuro-caller/
 ├── src/
 │   ├── __init__.py
-│   ├── app.py                    # Flask приложение
-│   ├── config.py                 # Конфигурация
+│   ├── app.py                          # Flask приложение
+│   ├── websocket_server.py             # WebSocket сервер для Media Streams
+│   ├── config.py                       # Конфигурация
 │   ├── routes/
 │   │   ├── __init__.py
-│   │   └── voice_routes.py       # Webhook endpoints
+│   │   └── voice_routes.py             # Webhook endpoints
 │   ├── services/
 │   │   ├── __init__.py
-│   │   ├── openai_service.py     # OpenAI интеграция
-│   │   └── twilio_service.py     # Twilio интеграция
+│   │   ├── realtime_client.py          # OpenAI Realtime API клиент
+│   │   ├── media_stream_handler.py     # Обработчик Media Streams
+│   │   ├── openai_service.py           # OpenAI интеграция (legacy)
+│   │   └── twilio_service.py           # Twilio интеграция
 │   ├── scripts/
 │   │   ├── __init__.py
-│   │   └── make_call.py          # Скрипт для звонков
+│   │   └── make_call.py                # Скрипт для звонков
 │   └── utils/
-│       └── __init__.py
-├── venv/                         # Виртуальное окружение
+│       ├── __init__.py
+│       └── audio_converter.py          # Конвертация аудио форматов
+├── start_servers.py                    # Запуск обоих серверов
+├── venv/                               # Виртуальное окружение
 ├── .env                          # Переменные окружения (не в git)
 ├── .env.example                  # Шаблон переменных
 ├── .gitignore
@@ -147,27 +161,49 @@ neuro-caller/
 
 ## 🔌 API Endpoints
 
-### Webhook Endpoints (для Twilio)
+### HTTP Endpoints (Flask - порт 3000)
 
-- `POST /voice/initial` - Начало звонка, приветствие
-- `POST /voice/process` - Обработка речи пользователя
+- `POST /voice/initial` - Начало звонка, инициация Media Stream
 - `POST /voice/status` - Обновления статуса звонка
-
-### Служебные Endpoints
-
 - `GET /` - Информация о сервисе
 - `GET /health` - Health check
 - `GET /voice/health` - Health check voice routes
 
-## 🎯 Как это работает
+### WebSocket Endpoints (порт 3001)
+
+- `WS /media-stream` - Twilio Media Streams для real-time аудио
+
+## 🎯 Как это работает (Realtime API Architecture)
+
+### Поток данных:
+
+```
+[Phone] <--(Audio)--> [Twilio] <--(WebSocket)--> [Media Stream Handler] <--(WebSocket)--> [OpenAI Realtime API]
+```
+
+### Пошаговый процесс:
 
 1. **Инициация звонка**: Скрипт `make_call.py` через Twilio API совершает звонок
-2. **Webhook /voice/initial**: Twilio отправляет webhook, получает приветствие
-3. **Распознавание речи**: Twilio распознает речь собеседника
-4. **Webhook /voice/process**: Текст отправляется в OpenAI GPT-4
-5. **Генерация ответа**: GPT-4 генерирует ответ на основе контекста
-6. **Синтез речи**: Twilio озвучивает ответ голосом Amazon Polly
-7. **Продолжение диалога**: Шаги 3-6 повторяются до завершения разговора
+2. **Webhook /voice/initial**: Twilio отправляет webhook, получает TwiML с инструкцией подключения к WebSocket
+3. **Установка WebSocket соединений**:
+   - Twilio подключается к нашему WebSocket серверу (порт 3001)
+   - Наш сервер подключается к OpenAI Realtime API
+4. **Двунаправленный аудио стрим**:
+   - Аудио от абонента → Twilio → WebSocket → Конвертация (mulaw→PCM16) → OpenAI
+   - OpenAI → PCM16 аудио ответ → Конвертация (PCM16→mulaw) → WebSocket → Twilio → Абонент
+5. **Обработка в реальном времени**:
+   - OpenAI Realtime API обрабатывает аудио напрямую (без текста)
+   - VAD (Voice Activity Detection) автоматически определяет паузы
+   - Ответ генерируется и озвучивается мгновенно
+6. **Завершение**: При окончании разговора все WebSocket соединения закрываются, ресурсы освобождаются
+
+### Преимущества Realtime API:
+
+- **~300ms задержка** вместо 2-3 секунд (старый подход)
+- Нативная обработка аудио (нет потерь при конвертации текст↔аудио)
+- Автоматическое определение пауз в речи
+- Естественные интонации и эмоции в голосе AI
+- Возможность перебивать AI (interrupt support)
 
 ## 📊 Логирование
 
@@ -236,9 +272,27 @@ Twilio поддерживает звонки на российские номе�
 
 ## 💰 Стоимость
 
-- **Twilio**: ~$0.01-0.05 за минуту исходящих звонков в Россию
-- **OpenAI GPT-4**: ~$0.01-0.03 за запрос (зависит от длины диалога)
-- **Примерная стоимость 1 звонка (3-5 минут)**: $0.10-0.30
+### OpenAI Realtime API Pricing
+
+- **Input audio**: $0.06 / minute
+- **Output audio**: $0.24 / minute
+- **Text input/output**: $5/$20 per 1M tokens
+
+### Twilio Pricing
+
+- **Исходящие звонки в Россию**: ~$0.01-0.05 / минуту
+
+### Примерная стоимость
+
+**1 звонок (3-5 минут)**:
+- Twilio: $0.03-0.25
+- OpenAI Realtime (3 мин входящего + 2 мин исходящего аудио): ~$0.66
+- **Итого**: ~$0.70-0.90 за звонок
+
+**Сравнение с классическим подходом**:
+- Старый метод (GPT-4 + TTS): $0.10-0.30
+- Realtime API: $0.70-0.90
+- **Но**: Значительно лучшее качество разговора и UX!
 
 ## 🔒 Безопасность
 
@@ -263,18 +317,71 @@ MIT
 
 ### Рекомендации
 
-1. Используйте production WSGI сервер (gunicorn)
-2. Настройте HTTPS
-3. Используйте переменные окружения для секретов
-4. Настройте мониторинг и алертинг
-5. Добавьте rate limiting
+1. Используйте production WSGI сервер (gunicorn для Flask)
+2. Запускайте WebSocket сервер через systemd или supervisor
+3. Настройте HTTPS и WSS (SSL для WebSocket)
+4. Используйте переменные окружения для секретов
+5. Настройте мониторинг и алертинг
+6. Добавьте rate limiting
+7. Используйте reverse proxy (nginx) для обоих портов
 
-### Пример с Gunicorn
+### Пример конфигурации
 
+**Flask через Gunicorn**:
 ```bash
-gunicorn -w 4 -b 0.0.0.0:3000 src.app:app
+gunicorn -w 4 -b 127.0.0.1:3000 src.app:app
 ```
+
+**WebSocket через systemd**:
+```ini
+[Unit]
+Description=Neuro-Caller WebSocket Server
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/var/www/neuro-caller
+Environment="PATH=/var/www/neuro-caller/venv/bin"
+ExecStart=/var/www/neuro-caller/venv/bin/python src/websocket_server.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Nginx reverse proxy**:
+```nginx
+# HTTP endpoint
+location / {
+    proxy_pass http://127.0.0.1:3000;
+}
+
+# WebSocket endpoint
+location /media-stream {
+    proxy_pass http://127.0.0.1:3001;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "Upgrade";
+}
+```
+
+## 🔧 Технологии
+
+- **Python 3.8+**
+- **Flask** - HTTP сервер для webhook'ов
+- **WebSockets** - Двунаправленная связь в реальном времени
+- **OpenAI Realtime API** - Speech-to-speech AI с низкой задержкой
+- **Twilio Media Streams** - Телефония с аудио стримингом
+- **audioop** - Конвертация форматов аудио (mulaw ↔ PCM16)
+
+## 📚 Полезные ссылки
+
+- [OpenAI Realtime API Documentation](https://platform.openai.com/docs/guides/realtime)
+- [Twilio Media Streams Documentation](https://www.twilio.com/docs/voice/twiml/stream)
+- [Twilio Voice TwiML](https://www.twilio.com/docs/voice/twiml)
+- [ngrok Documentation](https://ngrok.com/docs)
 
 ---
 
-Made with ❤️ for taxi recruitment automation
+Made with ❤️ and ⚡ Realtime API for taxi recruitment automation

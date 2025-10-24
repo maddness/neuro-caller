@@ -1,21 +1,17 @@
-"""Voice webhook routes for Twilio."""
+"""Voice webhook routes for Twilio with Realtime API support."""
 import logging
 from flask import Blueprint, request, Response
-from src.services.openai_service import OpenAIService
-from src.services.twilio_service import TwilioService
+from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
 voice_bp = Blueprint('voice', __name__, url_prefix='/voice')
 
-# Initialize services
-openai_service = OpenAIService()
-twilio_service = TwilioService()
-
 
 @voice_bp.route('/initial', methods=['POST'])
 def initial_call():
-    """Handle initial call connection."""
+    """Handle initial call connection with Media Streams."""
     try:
         call_sid = request.form.get('CallSid')
         from_number = request.form.get('From')
@@ -23,47 +19,28 @@ def initial_call():
 
         logger.info(f"Call {call_sid} connected: {from_number} -> {to_number}")
 
-        # Generate initial greeting
-        greeting = openai_service.generate_initial_greeting(call_sid)
+        # Create TwiML response with Stream
+        response = VoiceResponse()
 
-        # Create TwiML response
-        twiml = twilio_service.create_initial_response(greeting)
+        # Optional: Add a brief intro before connecting to stream
+        # response.say("Соединяем вас с нашим рекрутером...", voice='Polly.Tatyana', language='ru-RU')
 
-        return Response(twiml, mimetype='text/xml')
+        # Connect to Media Stream (WebSocket)
+        connect = Connect()
+        websocket_port = config.PORT + 1
+        stream_url = config.BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://')
+        stream_url = f"{stream_url}:{websocket_port}/media-stream"
+
+        stream = Stream(url=stream_url)
+        connect.append(stream)
+        response.append(connect)
+
+        logger.info(f"Connecting call {call_sid} to Media Stream: {stream_url}")
+
+        return Response(str(response), mimetype='text/xml')
 
     except Exception as e:
         logger.error(f"Error in initial call: {e}")
-        return Response(str(e), status=500)
-
-
-@voice_bp.route('/process', methods=['POST'])
-def process_speech():
-    """Process user speech and generate AI response."""
-    try:
-        call_sid = request.form.get('CallSid')
-        speech_result = request.form.get('SpeechResult', '')
-
-        logger.info(f"Call {call_sid} - User said: {speech_result}")
-
-        if not speech_result:
-            # No speech detected
-            twiml = twilio_service.create_conversation_response(
-                "Извините, я вас не расслышала. Можете повторить?"
-            )
-            return Response(twiml, mimetype='text/xml')
-
-        # Generate AI response
-        ai_response = openai_service.generate_response(speech_result, call_sid)
-
-        logger.info(f"Call {call_sid} - AI response: {ai_response}")
-
-        # Create TwiML response
-        twiml = twilio_service.create_conversation_response(ai_response)
-
-        return Response(twiml, mimetype='text/xml')
-
-    except Exception as e:
-        logger.error(f"Error processing speech: {e}")
         return Response(str(e), status=500)
 
 
@@ -75,11 +52,6 @@ def call_status():
         call_status = request.form.get('CallStatus')
 
         logger.info(f"Call {call_sid} status: {call_status}")
-
-        # Clean up conversation history when call ends
-        if call_status in ['completed', 'failed', 'busy', 'no-answer']:
-            openai_service.clear_history(call_sid)
-            logger.info(f"Cleared conversation history for call {call_sid}")
 
         return Response('OK', status=200)
 
