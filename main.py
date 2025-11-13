@@ -19,6 +19,7 @@ from src.file_manager import FileManager
 from src.audio_processor import AudioProcessor
 from src.transcriber import WhisperTranscriber
 from src.database import TranscriptionDatabase
+from src.telegram_notifier import TelegramNotifier
 
 
 # Настройка логирования
@@ -48,7 +49,10 @@ class TranscriptionPipeline:
         openai_api_key: str = None,
         language: str = "es",
         chunk_length_minutes: int = 10,
-        overlap_seconds: int = 5
+        overlap_seconds: int = 5,
+        telegram_bot_token: str = None,
+        telegram_chat_id: str = None,
+        telegram_enabled: bool = True
     ):
         """
         Args:
@@ -56,6 +60,9 @@ class TranscriptionPipeline:
             language: Язык аудио (ISO-639-1)
             chunk_length_minutes: Длина чанка в минутах
             overlap_seconds: Overlap между чанками в секундах
+            telegram_bot_token: Токен Telegram бота
+            telegram_chat_id: ID чата для уведомлений
+            telegram_enabled: Включены ли Telegram уведомления
         """
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -72,6 +79,13 @@ class TranscriptionPipeline:
             language=language
         )
         self.database = TranscriptionDatabase()
+
+        # Telegram уведомления
+        self.telegram = TelegramNotifier(
+            bot_token=telegram_bot_token,
+            chat_id=telegram_chat_id,
+            enabled=telegram_enabled
+        )
 
         self.logger.info("✅ Пайплайн готов к работе")
 
@@ -98,11 +112,24 @@ class TranscriptionPipeline:
             if device_info['uuid']:
                 self.logger.info(f"UUID: {device_info['uuid'][:16]}...")
             self.logger.info(f"{'='*60}\n")
+
+            # Telegram: уведомление о подключении устройства
+            self.telegram.notify_device_connected(
+                device_path=device_path,
+                device_id=device_name,
+                label=device_info.get('label')
+            )
         else:
             self.logger.info(f"\n{'='*60}")
             self.logger.info(f"Обработка устройства: {device_path}")
             self.logger.info(f"ID устройства: {device_name}")
             self.logger.info(f"{'='*60}\n")
+
+            # Telegram: уведомление о подключении устройства
+            self.telegram.notify_device_connected(
+                device_path=device_path,
+                device_id=device_name
+            )
 
         # ============================================================
         # ЭТАП 1: КОПИРОВАНИЕ ВСЕХ ФАЙЛОВ С ФЛЕШКИ НА ЖЕСТКИЙ ДИСК
@@ -116,8 +143,17 @@ class TranscriptionPipeline:
             self.logger.info("✓ Новых файлов не найдено")
             return
 
+        # Вычисляем общий размер скопированных файлов
+        total_size_mb = sum(f.get('size_bytes', 0) for f in copied_files) / (1024 * 1024)
+
         self.logger.info(f"\n✅ ВСЕ ФАЙЛЫ СКОПИРОВАНЫ НА ЖЕСТКИЙ ДИСК: {len(copied_files)} файлов")
         self.logger.info("   Теперь можно безопасно отключить флешку")
+
+        # Telegram: уведомление об окончании копирования
+        self.telegram.notify_copying_complete(
+            files_count=len(copied_files),
+            total_size_mb=total_size_mb
+        )
 
         # ============================================================
         # ЭТАП 2: ОБРАБОТКА СКОПИРОВАННЫХ ФАЙЛОВ
@@ -125,24 +161,37 @@ class TranscriptionPipeline:
         self.logger.info(f"\n🔄 ЭТАП 2: Транскрибация файлов ({len(copied_files)} шт)")
         self.logger.info("   (Нарезка на чанки + отправка в Whisper API)")
 
+        # Telegram: уведомление о начале обработки
+        self.telegram.notify_processing_started(files_count=len(copied_files))
+
         for i, file_info in enumerate(copied_files, 1):
             self.logger.info(f"\n{'─'*60}")
             self.logger.info(f"📝 Файл {i}/{len(copied_files)}: {Path(file_info['local_path']).name}")
             self.logger.info(f"{'─'*60}")
-            self.process_file(file_info)
+            self.process_file(file_info, file_num=i, total_files=len(copied_files))
 
         self.logger.info(f"\n{'='*60}")
         self.logger.info(f"✅ ВСЁ ГОТОВО! Обработано файлов: {len(copied_files)}")
         self.logger.info(f"{'='*60}")
 
-    def process_file(self, file_info: dict):
+        # Telegram: уведомление об окончании всей обработки
+        self.telegram.notify_all_complete(
+            files_count=len(copied_files),
+            device_name=device_name
+        )
+
+    def process_file(self, file_info: dict, file_num: int = 1, total_files: int = 1):
         """
         Обработка одного аудиофайла: разделение, транскрибация, сохранение
 
         Args:
             file_info: Информация о файле из FileManager
+            file_num: Номер файла в очереди
+            total_files: Всего файлов в очереди
         """
         file_path = Path(file_info['local_path'])
+        filename = file_path.name
+
         file_hash = next(
             (k for k, v in self.file_manager.processed_files.items()
              if v.get('local_path') == str(file_path)),
@@ -158,10 +207,26 @@ class TranscriptionPipeline:
                 f"{audio_info['format'].upper()}"
             )
 
+            # Telegram: уведомление о начале обработки файла
+            self.telegram.notify_file_processing(
+                file_num=file_num,
+                total_files=total_files,
+                filename=filename,
+                duration_min=audio_info['duration_minutes'],
+                size_mb=audio_info['file_size_mb']
+            )
+
             # Транскрибация (с автоматическим разделением если нужно)
             chunks_needed = audio_info['file_size_mb'] > 24
             if chunks_needed:
                 self.logger.info(f"⚠️  Файл большой, будет разделен на части с overlap {self.audio_processor.overlap_ms/1000:.0f}с")
+
+                # Telegram: уведомление о разделении на части
+                estimated_chunks = int(audio_info['file_size_mb'] / 24) + 1
+                self.telegram.notify_file_needs_chunking(
+                    filename=filename,
+                    chunks_count=estimated_chunks
+                )
 
             self.logger.info("🎤 Отправка в Whisper API для транскрибации...")
             transcription = self.transcriber.transcribe_file_with_splitting(
@@ -208,12 +273,29 @@ class TranscriptionPipeline:
                 self.file_manager.mark_as_processed(file_hash)
 
             word_count = len(transcription['text'].split())
+            char_count = len(transcription['text'])
+
             self.logger.info(f"\n✅ ГОТОВО! ID транскрипции: {transcription_id}")
-            self.logger.info(f"   Символов: {len(transcription['text'])}, Слов: {word_count}")
+            self.logger.info(f"   Символов: {char_count}, Слов: {word_count}")
             self.logger.info(f"   Фрагмент: {transcription['text'][:100]}...")
+
+            # Telegram: уведомление об окончании транскрибации файла
+            self.telegram.notify_transcription_complete(
+                file_num=file_num,
+                total_files=total_files,
+                filename=filename,
+                word_count=word_count,
+                char_count=char_count
+            )
 
         except Exception as e:
             self.logger.error(f"\n❌ ОШИБКА: {e}", exc_info=True)
+
+            # Telegram: уведомление об ошибке
+            self.telegram.notify_error(
+                error_message=str(e),
+                filename=filename
+            )
 
 
 def monitor_mode(args):
@@ -225,7 +307,10 @@ def monitor_mode(args):
         openai_api_key=args.api_key,
         language=args.language,
         chunk_length_minutes=args.chunk_length,
-        overlap_seconds=args.overlap
+        overlap_seconds=args.overlap,
+        telegram_bot_token=args.telegram_token,
+        telegram_chat_id=args.telegram_chat,
+        telegram_enabled=args.telegram_enabled
     )
 
     usb_monitor = USBMonitor(check_interval=args.check_interval)
@@ -267,7 +352,10 @@ def process_mode(args):
         openai_api_key=args.api_key,
         language=args.language,
         chunk_length_minutes=args.chunk_length,
-        overlap_seconds=args.overlap
+        overlap_seconds=args.overlap,
+        telegram_bot_token=args.telegram_token,
+        telegram_chat_id=args.telegram_chat,
+        telegram_enabled=args.telegram_enabled
     )
 
     path = Path(args.path)
@@ -380,6 +468,9 @@ def main():
     monitor_parser.add_argument("--language", default="es", help="Язык аудио (ISO-639-1)")
     monitor_parser.add_argument("--chunk-length", type=int, default=10, help="Длина чанка (минуты)")
     monitor_parser.add_argument("--overlap", type=int, default=5, help="Overlap (секунды)")
+    monitor_parser.add_argument("--telegram-token", help="Telegram bot token")
+    monitor_parser.add_argument("--telegram-chat", help="Telegram chat ID")
+    monitor_parser.add_argument("--telegram-enabled", type=bool, default=True, help="Включить Telegram уведомления")
 
     # Команда: process
     process_parser = subparsers.add_parser("process", help="Обработать устройство или файл")
@@ -388,6 +479,9 @@ def main():
     process_parser.add_argument("--language", default="es", help="Язык аудио (ISO-639-1)")
     process_parser.add_argument("--chunk-length", type=int, default=10, help="Длина чанка (минуты)")
     process_parser.add_argument("--overlap", type=int, default=5, help="Overlap (секунды)")
+    process_parser.add_argument("--telegram-token", help="Telegram bot token")
+    process_parser.add_argument("--telegram-chat", help="Telegram chat ID")
+    process_parser.add_argument("--telegram-enabled", type=bool, default=True, help="Включить Telegram уведомления")
 
     # Команда: stats
     stats_parser = subparsers.add_parser("stats", help="Показать статистику")

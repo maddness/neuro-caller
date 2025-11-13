@@ -19,6 +19,7 @@
 - ✅ **Разделение больших файлов** на части с overlap
 - ✅ **Транскрибация** через OpenAI Whisper API
 - ✅ **База данных** SQLite с полнотекстовым поиском
+- ✅ **Telegram уведомления** о каждом этапе обработки
 - ✅ **Поддержка форматов**: MP3, WAV, M4A, FLAC, OGG, AAC, WMA
 - ✅ **Многоязычность** - по умолчанию испанский (es)
 - ✅ **CLI интерфейс** для всех операций
@@ -99,7 +100,21 @@ CHUNK_LENGTH_MINUTES=10
 OVERLAP_SECONDS=5
 CHECK_INTERVAL=5
 LOG_LEVEL=INFO
+
+# Telegram уведомления (опционально)
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+TELEGRAM_CHAT_ID=your-telegram-chat-id
+TELEGRAM_ENABLED=true
 ```
+
+**Настройка Telegram уведомлений (опционально):**
+
+Система может отправлять уведомления в Telegram о каждом этапе обработки. Подробная инструкция: [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md)
+
+Кратко:
+1. Создайте бота через [@BotFather](https://t.me/botfather)
+2. Получите Chat ID через [@userinfobot](https://t.me/userinfobot)
+3. Добавьте в `.env` файл
 
 ### 3. Запуск
 

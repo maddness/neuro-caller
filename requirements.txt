@@ -13,6 +13,9 @@ psutil>=5.9.0
 # Загрузка переменных окружения
 python-dotenv>=1.0.0
 
+# Telegram уведомления
+aiogram>=3.0.0
+
 # Дополнительно для pydub
 # Установите ffmpeg отдельно:
 # Ubuntu/Debian: sudo apt-get install ffmpeg
