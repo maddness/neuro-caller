@@ -161,17 +161,20 @@ class FileManager:
             logger.error(f"Ошибка копирования файла {source_path}: {e}")
             raise
 
-    def process_new_files(self, device_path: str) -> List[Dict]:
+    def process_new_files(self, device_path: str, device_name: str = None) -> List[Dict]:
         """
         Обработка новых файлов с устройства: поиск, копирование и регистрация
 
         Args:
             device_path: Путь к устройству
+            device_name: Уникальное имя устройства (если None, используется имя из пути)
 
         Returns:
             Список информации о скопированных файлах
         """
-        device_name = Path(device_path).name
+        if device_name is None:
+            device_name = Path(device_path).name
+
         new_files = self.find_new_files(device_path)
 
         if not new_files:

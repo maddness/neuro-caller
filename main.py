@@ -75,20 +75,38 @@ class TranscriptionPipeline:
 
         self.logger.info("✅ Пайплайн готов к работе")
 
-    def process_device(self, device_path: str):
+    def process_device(self, device_path: str, device_name: str = None):
         """
         Обработка всех новых файлов с устройства
 
         Args:
             device_path: Путь к подключенному устройству
+            device_name: Уникальное имя устройства (получается автоматически если None)
         """
-        self.logger.info(f"\n{'='*60}")
-        self.logger.info(f"Обработка устройства: {device_path}")
-        self.logger.info(f"{'='*60}\n")
+        # Получаем информацию об устройстве
+        from src.usb_monitor import USBMonitor
+
+        if device_name is None:
+            device_info = USBMonitor.get_device_info(device_path)
+            device_name = device_info['unique_id']
+
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"Обработка устройства: {device_path}")
+            self.logger.info(f"Уникальный ID: {device_name}")
+            if device_info['label']:
+                self.logger.info(f"Метка: {device_info['label']}")
+            if device_info['uuid']:
+                self.logger.info(f"UUID: {device_info['uuid'][:16]}...")
+            self.logger.info(f"{'='*60}\n")
+        else:
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"Обработка устройства: {device_path}")
+            self.logger.info(f"ID устройства: {device_name}")
+            self.logger.info(f"{'='*60}\n")
 
         # Шаг 1: Поиск и копирование новых файлов
         self.logger.info("Шаг 1: Поиск новых аудиофайлов...")
-        copied_files = self.file_manager.process_new_files(device_path)
+        copied_files = self.file_manager.process_new_files(device_path, device_name=device_name)
 
         if not copied_files:
             self.logger.info("Новых файлов не найдено")
@@ -197,6 +215,14 @@ def monitor_mode(args):
         """Обработчик подключения нового устройства"""
         logger.info(f"\n🔌 Новое устройство подключено: {device_path}")
 
+        # Получаем информацию об устройстве
+        device_info = USBMonitor.get_device_info(device_path)
+        logger.info(f"   Уникальный ID: {device_info['unique_id']}")
+        if device_info['label']:
+            logger.info(f"   Метка: {device_info['label']}")
+        if device_info['uuid']:
+            logger.info(f"   UUID: {device_info['uuid'][:16]}...")
+
         # Проверяем, есть ли аудио файлы
         if not USBMonitor.is_audio_recorder(device_path):
             logger.info("⚠️  Аудио файлы не найдены, пропускаем")
@@ -205,7 +231,8 @@ def monitor_mode(args):
         logger.info("✅ Обнаружен аудио диктофон, начинаем обработку...")
 
         try:
-            pipeline.process_device(device_path)
+            # Передаем уже полученный device_name
+            pipeline.process_device(device_path, device_name=device_info['unique_id'])
         except Exception as e:
             logger.error(f"Ошибка обработки устройства: {e}", exc_info=True)
 

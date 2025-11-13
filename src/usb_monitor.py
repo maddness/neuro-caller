@@ -6,8 +6,9 @@ USB устройства мониторинг и обнаружение
 import os
 import time
 import logging
+import subprocess
 from pathlib import Path
-from typing import List, Set, Optional
+from typing import List, Set, Optional, Dict
 import psutil
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,100 @@ class USBMonitor:
             logger.info("Мониторинг остановлен пользователем")
 
     @staticmethod
+    def get_device_info(mount_point: str) -> Dict[str, str]:
+        """
+        Получить уникальную информацию об устройстве
+
+        Args:
+            mount_point: Точка монтирования устройства
+
+        Returns:
+            Словарь с информацией об устройстве (uuid, label, serial, unique_id)
+        """
+        info = {
+            'mount_point': mount_point,
+            'uuid': None,
+            'label': None,
+            'serial': None,
+            'device': None,
+            'unique_id': None
+        }
+
+        try:
+            # Получаем устройство для точки монтирования
+            for partition in psutil.disk_partitions(all=False):
+                if partition.mountpoint == mount_point:
+                    info['device'] = partition.device
+                    break
+
+            if not info['device']:
+                logger.warning(f"Не найдено устройство для {mount_point}")
+                # Используем имя точки монтирования как fallback
+                info['unique_id'] = Path(mount_point).name
+                return info
+
+            device = info['device']
+
+            # Получаем UUID устройства
+            try:
+                result = subprocess.run(
+                    ['blkid', '-s', 'UUID', '-o', 'value', device],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    info['uuid'] = result.stdout.strip()
+            except Exception as e:
+                logger.debug(f"Не удалось получить UUID для {device}: {e}")
+
+            # Получаем LABEL устройства
+            try:
+                result = subprocess.run(
+                    ['blkid', '-s', 'LABEL', '-o', 'value', device],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    info['label'] = result.stdout.strip()
+            except Exception as e:
+                logger.debug(f"Не удалось получить LABEL для {device}: {e}")
+
+            # Получаем serial number (если доступен)
+            try:
+                # Извлекаем имя устройства без номера раздела (sdb1 -> sdb)
+                device_name = device.split('/')[-1].rstrip('0123456789')
+                serial_path = f"/sys/block/{device_name}/device/serial"
+
+                if os.path.exists(serial_path):
+                    with open(serial_path, 'r') as f:
+                        info['serial'] = f.read().strip()
+            except Exception as e:
+                logger.debug(f"Не удалось получить serial для {device}: {e}")
+
+            # Формируем уникальный ID
+            # Приоритет: UUID > Serial > Label > имя точки монтирования
+            if info['uuid']:
+                info['unique_id'] = f"UUID_{info['uuid'][:8]}"
+            elif info['serial']:
+                info['unique_id'] = f"SN_{info['serial']}"
+            elif info['label']:
+                info['unique_id'] = f"LBL_{info['label']}"
+            else:
+                # Последний вариант - используем имя точки монтирования
+                info['unique_id'] = Path(mount_point).name
+
+            logger.debug(f"Информация об устройстве {mount_point}: {info}")
+
+        except Exception as e:
+            logger.error(f"Ошибка получения информации об устройстве {mount_point}: {e}")
+            # Fallback - используем имя точки монтирования
+            info['unique_id'] = Path(mount_point).name
+
+        return info
+
+    @staticmethod
     def is_audio_recorder(device_path: str) -> bool:
         """
         Проверка, является ли устройство аудио диктофоном
@@ -140,6 +235,17 @@ if __name__ == "__main__":
 
     def on_new_device(device_path):
         print(f"\n🔌 Новое устройство подключено: {device_path}")
+
+        # Получаем информацию об устройстве
+        device_info = USBMonitor.get_device_info(device_path)
+        print(f"   Уникальный ID: {device_info['unique_id']}")
+        if device_info['label']:
+            print(f"   Метка: {device_info['label']}")
+        if device_info['uuid']:
+            print(f"   UUID: {device_info['uuid']}")
+        if device_info['serial']:
+            print(f"   Serial: {device_info['serial']}")
+
         if USBMonitor.is_audio_recorder(device_path):
             print(f"✅ Это аудио диктофон!")
         else:
