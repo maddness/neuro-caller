@@ -1,142 +1,213 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this repository.
 
 ## Проект
 
-**Neuro-Caller** - AI-powered система телефонного рекрутинга водителей для такси-сервиса. Использует Voximplant для телефонии и OpenAI Realtime API для натуральных голосовых разговоров с минимальной задержкой (~300ms).
+**USB Audio Recorder Transcription Pipeline** - автоматическая система для транскрибации аудиозаписей с USB диктофонов через OpenAI Whisper API.
 
 ## Основные команды
 
 ### Установка
+
 ```bash
+# Создание виртуального окружения
+python3 -m venv venv
+source venv/bin/activate
+
+# Установка зависимостей
 pip install -r requirements.txt
+
+# Установка ffmpeg (необходим для pydub)
+sudo apt-get install ffmpeg  # Ubuntu/Debian
 ```
 
 ### Настройка
+
 ```bash
 cp .env.example .env
-# Отредактировать .env с вашими данными Voximplant и OpenAI
+# Отредактировать .env с вашим OpenAI API ключом
 ```
 
-### Совершение звонков
-```bash
-cd voximplant
-python make_call_vox.py +79991234567              # Обычный звонок
-python make_call_vox.py +79991234567 --test       # Тестовый режим
-python make_call_vox.py +79991234567 --configure  # С настройкой OpenAI
-python make_call_vox.py +79991234567 --stats      # Со статистикой
-```
+### Запуск
 
-### Управление через SDK
 ```bash
-cd voximplant
-python vox_manager.py  # Настройка OpenAI и просмотр статистики
+# Мониторинг USB устройств
+python main.py monitor
+
+# Обработка конкретного устройства или файла
+python main.py process /path/to/device/or/file
+
+# Просмотр статистики
+python main.py stats
+
+# Поиск в транскрипциях
+python main.py search "текст запроса"
 ```
 
 ## Архитектура
 
-### Serverless архитектура Voximplant
+### Структура проекта
 
 ```
-[Телефон] ←→ [Voximplant Cloud + VoxEngine] ←→ [OpenAI Realtime API]
-                        ↑
-                JavaScript сценарий
-              (voximplant/recruitment_bot.js)
+neuro-caller/
+├── src/
+│   ├── usb_monitor.py       # Мониторинг USB устройств
+│   ├── file_manager.py      # Управление файлами
+│   ├── audio_processor.py   # Разделение аудио на части
+│   ├── transcriber.py       # Транскрибация через Whisper API
+│   └── database.py          # SQLite база данных
+├── main.py                  # Главный CLI интерфейс
+└── data/                    # Данные и база данных
 ```
 
-**Преимущества**:
-- Не нужны серверы (полностью облачное решение)
-- Встроенная интеграция с OpenAI Realtime API
-- Автоматическая конвертация аудио форматов
-- Оптимизировано для российского рынка (9 дата-центров в Европе)
-- Экономия ~15% на звонках по сравнению с альтернативами
+### Компоненты
 
-## Ключевые компоненты
+**USBMonitor (src/usb_monitor.py)**
+- Обнаружение подключения USB устройств
+- Проверка наличия аудиофайлов
+- Непрерывный мониторинг с заданным интервалом
 
-**voximplant/recruitment_bot.js**
-- VoxEngine сценарий (загружается в Voximplant Cloud IDE)
-- Обработка входящих и исходящих звонков
-- Интеграция с OpenAI через встроенный клиент `OpenAI.RealtimeAPIClient`
-- Настройка диалога через функцию `getSystemInstructions()`
+**FileManager (src/file_manager.py)**
+- Поиск новых аудиофайлов на устройстве
+- Вычисление MD5 хеша для отслеживания обработанных файлов
+- Копирование файлов в локальное хранилище
+- Ведение реестра обработанных файлов (JSON)
 
-**voximplant/vox_manager.py**
-- Python SDK для управления Voximplant API
-- Методы: `make_call()`, `get_call_history()`, `get_statistics()`
-- Настройка OpenAI параметров в Application Storage
-- Авторизация и управление сессиями
+**AudioProcessor (src/audio_processor.py)**
+- Загрузка аудиофайлов через pydub
+- Разделение больших файлов на части (макс 24MB)
+- Добавление overlap между частями (по умолчанию 5 секунд)
+- Поддержка форматов: MP3, WAV, M4A, FLAC, OGG, AAC, WMA
 
-**voximplant/make_call_vox.py**
-- CLI скрипт для инициации звонков
-- Поддержка тестового режима (--test)
-- Настройка OpenAI перед звонком (--configure)
-- Отображение статистики (--stats)
+**WhisperTranscriber (src/transcriber.py)**
+- Транскрибация через OpenAI Whisper API
+- Поддержка любого языка (по умолчанию испанский 'es')
+- Автоматическая обработка больших файлов с разделением
+- Объединение результатов из нескольких чанков
+
+**TranscriptionDatabase (src/database.py)**
+- SQLite база данных с FTS5 полнотекстовым поиском
+- Хранение транскрипций с метаданными
+- Статистика по устройствам и датам
+- Быстрый поиск по тексту
+
+### Поток данных
+
+```
+USB устройство
+    ↓
+USBMonitor (обнаружение)
+    ↓
+FileManager (копирование новых файлов)
+    ↓
+AudioProcessor (разделение на части если нужно)
+    ↓
+WhisperTranscriber (транскрибация через API)
+    ↓
+TranscriptionDatabase (сохранение результатов)
+```
 
 ## Переменные окружения (.env)
 
-```
-# Voximplant
-VOXIMPLANT_ACCOUNT_ID=12345
-VOXIMPLANT_API_KEY=your_api_key
-VOXIMPLANT_APP_ID=67890
-VOXIMPLANT_RULE_ID=11111
-VOXIMPLANT_USERNAME=user@app.account.voximplant.com
-VOXIMPLANT_PASSWORD=your_password
-VOXIMPLANT_PHONE_NUMBER=+7XXXXXXXXXX
-
-# OpenAI
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
-
-# Taxi Brand
-TAXI_BRAND_NAME=Ваше Такси
-RECRUITMENT_PROMPT=Кастомный промпт (опционально)
+```env
+OPENAI_API_KEY=sk-...          # OpenAI API ключ
+LANGUAGE=es                     # Язык аудио (ISO-639-1)
+CHUNK_LENGTH_MINUTES=10         # Длина чанка в минутах
+OVERLAP_SECONDS=5               # Overlap между чанками
+CHECK_INTERVAL=5                # Интервал проверки USB устройств
+LOG_LEVEL=INFO                  # Уровень логирования
 ```
 
-## Настройка диалога AI рекрутера
+## База данных
 
-Диалог настраивается в `voximplant/recruitment_bot.js`:
+### Таблицы
 
-```javascript
-function getSystemInstructions() {
-    return `Вы - Анна, дружелюбный рекрутер такси-сервиса ${config.taxiBrandName}.
-    // ... инструкции для AI
-    `;
-}
+**transcriptions**
+- Основная таблица с транскрипциями
+- Поля: id, file_hash, original_filename, device_name, audio_file_path, transcription_text, language, duration_seconds, word_count, created_at, processed_at, metadata
+
+**transcription_chunks**
+- Чанки для файлов, которые были разделены
+- Связь с transcriptions через foreign key
+
+**transcriptions_fts**
+- FTS5 виртуальная таблица для полнотекстового поиска
+
+## Зависимости
+
+- **openai**: OpenAI API клиент
+- **pydub**: Обработка аудио файлов
+- **psutil**: Системные утилиты (мониторинг устройств)
+- **python-dotenv**: Загрузка переменных окружения
+- **ffmpeg**: Необходим для pydub (устанавливается отдельно)
+
+## Ограничения и особенности
+
+- Максимальный размер файла для Whisper API: 25MB (файлы автоматически разделяются)
+- Overlap между чанками для плавности транскрипции
+- MD5 хеширование для отслеживания обработанных файлов
+- Автоматическая организация файлов по дате и устройству
+
+## Стоимость
+
+OpenAI Whisper API: $0.006 за минуту аудио
+- 1 час записи = $0.36
+- 8 часов (рабочий день) = $2.88
+
+## Разработка
+
+### Тестирование модулей
+
+Каждый модуль можно запустить отдельно для тестирования:
+
+```bash
+python -m src.usb_monitor
+python -m src.file_manager
+python -m src.audio_processor
+python -m src.transcriber
+python -m src.database
 ```
 
-Параметры хранятся в Voximplant Application Storage:
-- `openai_api_key` - API ключ OpenAI
-- `taxi_brand_name` - название бренда
-- `recruitment_prompt` - кастомный промпт
+### Логирование
 
-## Формат аудио
+Логи сохраняются в `logs/transcription.log`
+Уровень логирования настраивается через `--log-level` флаг
 
-Voximplant автоматически конвертирует аудио между форматами:
-- Телефон ↔ Voximplant: автоматическая обработка
-- Voximplant ↔ OpenAI: PCM16 формат
-- Не требуется ручная конвертация
+## Использование
 
-## Стоимость звонков
+### Автоматический режим
 
-| Компонент | Стоимость |
-|-----------|-----------|
-| Voximplant (РФ) | $0.01-0.03/мин |
-| OpenAI Realtime | $0.06/мин (input) + $0.24/мин (output) |
-| **Итого за 5 мин** | **~$0.76** |
+```bash
+# Запуск мониторинга
+python main.py monitor
 
-## Развертывание в продакшн
+# Подключите USB диктофон
+# Система автоматически обработает все новые файлы
+```
 
-1. **Настройка Voximplant** - следуйте [VOXIMPLANT_SETUP.md](VOXIMPLANT_SETUP.md)
-2. **Загрузка сценария** - скопируйте `recruitment_bot.js` в Cloud IDE
-3. **Настройка переменных** - заполните Application Storage
-4. **Тестирование** - запустите тестовый звонок
-5. **Мониторинг** - используйте панель Voximplant для логов
+### Ручной режим
 
-Код уже выполняется в облаке - не требуется деплой серверов!
+```bash
+# Обработка устройства
+python main.py process /media/usb0
+
+# Обработка файла
+python main.py process /path/to/recording.mp3
+
+# Просмотр результатов
+python main.py stats
+python main.py search "ключевое слово"
+```
+
+## Типичные сценарии использования
+
+1. **Call-центр**: Агенты вечером подключают диктофоны, система автоматически транскрибирует все разговоры за день
+2. **Ручная обработка**: Разовая транскрибация конкретного файла или устройства
+3. **Поиск и анализ**: Полнотекстовый поиск по всем транскрипциям в базе данных
 
 ## Документация
 
-- **[VOXIMPLANT_SETUP.md](VOXIMPLANT_SETUP.md)** - Подробная инструкция по настройке
-- **[README.md](README.md)** - Основная документация проекта
-- [Voximplant Docs](https://voximplant.com/docs) - Официальная документация
-- [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime) - Документация OpenAI
+- **README.md**: Полная документация на русском языке
+- **Комментарии в коде**: Все модули подробно документированы
+- **Примеры**: Включены в README.md и в секциях `if __name__ == "__main__"` каждого модуля
