@@ -104,22 +104,36 @@ class TranscriptionPipeline:
             self.logger.info(f"ID устройства: {device_name}")
             self.logger.info(f"{'='*60}\n")
 
-        # Шаг 1: Поиск и копирование новых файлов
-        self.logger.info("Шаг 1: Поиск новых аудиофайлов...")
+        # ============================================================
+        # ЭТАП 1: КОПИРОВАНИЕ ВСЕХ ФАЙЛОВ С ФЛЕШКИ НА ЖЕСТКИЙ ДИСК
+        # ============================================================
+        self.logger.info("📋 ЭТАП 1: Поиск и копирование новых аудиофайлов...")
+        self.logger.info("   (Сначала копируем ВСЕ файлы, потом обрабатываем)")
+
         copied_files = self.file_manager.process_new_files(device_path, device_name=device_name)
 
         if not copied_files:
-            self.logger.info("Новых файлов не найдено")
+            self.logger.info("✓ Новых файлов не найдено")
             return
 
-        self.logger.info(f"Найдено новых файлов: {len(copied_files)}")
+        self.logger.info(f"\n✅ ВСЕ ФАЙЛЫ СКОПИРОВАНЫ НА ЖЕСТКИЙ ДИСК: {len(copied_files)} файлов")
+        self.logger.info("   Теперь можно безопасно отключить флешку")
 
-        # Шаг 2: Обработка каждого файла
+        # ============================================================
+        # ЭТАП 2: ОБРАБОТКА СКОПИРОВАННЫХ ФАЙЛОВ
+        # ============================================================
+        self.logger.info(f"\n🔄 ЭТАП 2: Транскрибация файлов ({len(copied_files)} шт)")
+        self.logger.info("   (Нарезка на чанки + отправка в Whisper API)")
+
         for i, file_info in enumerate(copied_files, 1):
-            self.logger.info(f"\n--- Файл {i}/{len(copied_files)} ---")
+            self.logger.info(f"\n{'─'*60}")
+            self.logger.info(f"📝 Файл {i}/{len(copied_files)}: {Path(file_info['local_path']).name}")
+            self.logger.info(f"{'─'*60}")
             self.process_file(file_info)
 
-        self.logger.info(f"\n✅ Обработка устройства завершена: {len(copied_files)} файлов")
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info(f"✅ ВСЁ ГОТОВО! Обработано файлов: {len(copied_files)}")
+        self.logger.info(f"{'='*60}")
 
     def process_file(self, file_info: dict):
         """
@@ -135,26 +149,29 @@ class TranscriptionPipeline:
             None
         )
 
-        self.logger.info(f"Обработка: {file_path.name}")
-
         try:
-            # Шаг 2: Получение информации о файле
+            # Получение информации о файле
             audio_info = self.audio_processor.get_audio_info(file_path)
             self.logger.info(
-                f"  Аудио: {audio_info['duration_minutes']:.1f} мин, "
-                f"{audio_info['file_size_mb']:.1f} MB"
+                f"📊 Файл: {audio_info['duration_minutes']:.1f} мин, "
+                f"{audio_info['file_size_mb']:.1f} MB, "
+                f"{audio_info['format'].upper()}"
             )
 
-            # Шаг 3: Транскрибация (с автоматическим разделением если нужно)
-            self.logger.info("  Транскрибация...")
+            # Транскрибация (с автоматическим разделением если нужно)
+            chunks_needed = audio_info['file_size_mb'] > 24
+            if chunks_needed:
+                self.logger.info(f"⚠️  Файл большой, будет разделен на части с overlap {self.audio_processor.overlap_ms/1000:.0f}с")
+
+            self.logger.info("🎤 Отправка в Whisper API для транскрибации...")
             transcription = self.transcriber.transcribe_file_with_splitting(
                 file_path,
                 audio_processor=self.audio_processor,
                 save_chunks=False  # Удаляем временные чанки
             )
 
-            # Шаг 4: Сохранение в базу данных
-            self.logger.info("  Сохранение в БД...")
+            # Сохранение в базу данных
+            self.logger.info("💾 Сохранение транскрипции в БД...")
 
             # Подготовка чанков для БД
             chunks_data = None
@@ -190,11 +207,13 @@ class TranscriptionPipeline:
             if file_hash:
                 self.file_manager.mark_as_processed(file_hash)
 
-            self.logger.info(f"  ✅ Успешно обработан! ID транскрипции: {transcription_id}")
-            self.logger.info(f"  Текст ({len(transcription['text'])} символов): {transcription['text'][:150]}...")
+            word_count = len(transcription['text'].split())
+            self.logger.info(f"\n✅ ГОТОВО! ID транскрипции: {transcription_id}")
+            self.logger.info(f"   Символов: {len(transcription['text'])}, Слов: {word_count}")
+            self.logger.info(f"   Фрагмент: {transcription['text'][:100]}...")
 
         except Exception as e:
-            self.logger.error(f"  ❌ Ошибка обработки файла: {e}", exc_info=True)
+            self.logger.error(f"\n❌ ОШИБКА: {e}", exc_info=True)
 
 
 def monitor_mode(args):

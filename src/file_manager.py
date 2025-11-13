@@ -181,10 +181,18 @@ class FileManager:
             logger.info("Новых файлов не найдено")
             return []
 
-        copied_files = []
+        logger.info(f"\n📦 Начинаем копирование {len(new_files)} файлов с флешки...")
+        logger.info(f"   С флешки: {device_path}")
+        logger.info(f"   На диск: {self.local_storage_path}\n")
 
-        for source_file in new_files:
+        copied_files = []
+        total_size_mb = 0
+
+        for i, source_file in enumerate(new_files, 1):
             try:
+                file_size_mb = source_file.stat().st_size / (1024 * 1024)
+                logger.info(f"   [{i}/{len(new_files)}] Копирую: {source_file.name} ({file_size_mb:.1f} MB)")
+
                 # Копируем файл
                 destination_path = self.copy_file(source_file, device_name)
 
@@ -203,16 +211,17 @@ class FileManager:
 
                 self.processed_files[file_hash] = file_info
                 copied_files.append(file_info)
+                total_size_mb += file_size_mb
 
-                logger.info(f"✅ Обработан: {source_file.name}")
+                logger.info(f"        ✓ Скопирован в: {destination_path.relative_to(self.local_storage_path)}")
 
             except Exception as e:
-                logger.error(f"❌ Ошибка обработки {source_file}: {e}")
+                logger.error(f"        ✗ Ошибка: {e}")
 
         # Сохраняем БД
         self._save_processed_files()
 
-        logger.info(f"Всего скопировано: {len(copied_files)} файлов")
+        logger.info(f"\n📊 Итого скопировано: {len(copied_files)}/{len(new_files)} файлов, {total_size_mb:.1f} MB")
         return copied_files
 
     def mark_as_processed(self, file_hash: str):
