@@ -30,9 +30,58 @@ class AudioProcessor:
 
         logger.info(f"AudioProcessor инициализирован: chunk={chunk_length_ms}ms, overlap={overlap_ms}ms")
 
+    def convert_with_ffmpeg(self, input_path: Path, output_path: Path = None) -> Path:
+        """
+        Конвертация аудио через ffmpeg в PCM WAV формат
+
+        Args:
+            input_path: Путь к входному файлу
+            output_path: Путь к выходному файлу (опционально)
+
+        Returns:
+            Путь к сконвертированному файлу
+        """
+        import subprocess
+        import tempfile
+
+        if output_path is None:
+            # Создаем временный файл
+            temp_dir = Path(tempfile.gettempdir())
+            output_path = temp_dir / f"{input_path.stem}_converted.wav"
+
+        try:
+            logger.info(f"Конвертирую {input_path.name} через ffmpeg...")
+
+            # Конвертируем в PCM WAV
+            result = subprocess.run(
+                [
+                    'ffmpeg',
+                    '-i', str(input_path),
+                    '-ar', '48000',  # Sample rate 48kHz
+                    '-ac', '1',  # Mono
+                    '-c:a', 'pcm_s16le',  # PCM 16-bit
+                    '-y',  # Overwrite output file
+                    str(output_path)
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 минут timeout для длинных файлов
+            )
+
+            if result.returncode != 0:
+                logger.error(f"ffmpeg ошибка: {result.stderr}")
+                raise RuntimeError(f"ffmpeg конвертация не удалась: {result.stderr}")
+
+            logger.info(f"✓ Конвертация завершена: {output_path.name}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Ошибка конвертации через ffmpeg: {e}")
+            raise
+
     def load_audio(self, file_path: Path) -> AudioSegment:
         """
-        Загрузка аудиофайла
+        Загрузка аудиофайла через ffmpeg конвертацию
 
         Args:
             file_path: Путь к аудиофайлу
@@ -43,14 +92,14 @@ class AudioProcessor:
         try:
             logger.info(f"Загрузка аудио: {file_path.name}")
 
-            # Определяем формат по расширению
-            file_format = file_path.suffix.lstrip('.').lower()
+            # Конвертируем через ffmpeg в стандартный PCM WAV
+            converted_path = self.convert_with_ffmpeg(file_path)
 
-            # Загружаем аудио
-            audio = AudioSegment.from_file(str(file_path), format=file_format)
+            # Загружаем сконвертированный файл
+            audio = AudioSegment.from_file(str(converted_path), format='wav')
 
             duration_sec = len(audio) / 1000
-            logger.info(f"Аудио загружено: длительность {duration_sec:.1f}с, формат {file_format}")
+            logger.info(f"✓ Аудио загружено: длительность {duration_sec:.1f}с")
 
             return audio
 
@@ -197,7 +246,7 @@ class AudioProcessor:
     @staticmethod
     def get_audio_info(file_path: Path) -> dict:
         """
-        Получение информации об аудиофайле
+        Получение информации об аудиофайле через ffprobe
 
         Args:
             file_path: Путь к аудиофайлу
@@ -205,24 +254,41 @@ class AudioProcessor:
         Returns:
             Словарь с информацией
         """
+        import subprocess
+
         try:
-            file_format = file_path.suffix.lstrip('.').lower()
-            audio = AudioSegment.from_file(str(file_path), format=file_format)
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries',
+                 'format=duration,size', '-of', 'default=noprint_wrappers=1',
+                 str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
 
-            info = {
-                "duration_seconds": len(audio) / 1000,
-                "duration_minutes": len(audio) / 60000,
-                "channels": audio.channels,
-                "sample_width": audio.sample_width,
-                "frame_rate": audio.frame_rate,
-                "file_size_mb": file_path.stat().st_size / (1024 * 1024),
-                "format": file_format
-            }
+            if result.returncode == 0:
+                duration = 0
+                for line in result.stdout.strip().split('\n'):
+                    if line.startswith('duration='):
+                        duration = float(line.split('=')[1])
 
-            return info
+                info = {
+                    "duration_seconds": duration,
+                    "duration_minutes": duration / 60,
+                    "channels": 1,  # Предполагаем mono
+                    "sample_width": 2,
+                    "frame_rate": 48000,
+                    "file_size_mb": file_path.stat().st_size / (1024 * 1024),
+                    "format": file_path.suffix.lstrip('.').lower()
+                }
+                logger.info(f"✓ Информация получена: {duration:.1f} сек")
+                return info
+            else:
+                logger.error(f"ffprobe ошибка: {result.stderr}")
+                return {}
 
         except Exception as e:
-            logger.error(f"Ошибка получения информации о {file_path}: {e}")
+            logger.error(f"Ошибка получения информации: {e}")
             return {}
 
 

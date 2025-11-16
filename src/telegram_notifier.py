@@ -8,7 +8,7 @@ from typing import Optional
 from datetime import datetime
 import asyncio
 from aiogram import Bot
-from aiogram.types import ParseMode
+from aiogram.enums import ParseMode
 
 logger = logging.getLogger(__name__)
 

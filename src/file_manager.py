@@ -92,6 +92,10 @@ class FileManager:
         try:
             for root, dirs, files in os.walk(device_path):
                 for file in files:
+                    # Пропускаем macOS служебные файлы
+                    if file.startswith('._') or file.startswith('.'):
+                        continue
+
                     file_path = Path(root) / file
                     if file_path.suffix.lower() in self.AUDIO_EXTENSIONS:
                         audio_files.append(file_path)
@@ -102,6 +106,27 @@ class FileManager:
             logger.error(f"Ошибка поиска файлов на {device_path}: {e}")
 
         return audio_files
+
+    def _is_duplicate_by_device_and_name(self, file_path: Path, device_name: str) -> bool:
+        """
+        Проверка дубликата по устройству + имени файла (быстро, без MD5)
+
+        Args:
+            file_path: Путь к файлу
+            device_name: Имя устройства
+
+        Returns:
+            True если файл с device+name уже обработан
+        """
+        filename = file_path.name
+
+        for file_info in self.processed_files.values():
+            # Проверяем: то же устройство + то же имя файла
+            if (file_info.get("device") == device_name and
+                Path(file_info.get("original_path", "")).name == filename):
+                return True
+
+        return False
 
     def find_new_files(self, device_path: str) -> List[Path]:
         """
@@ -116,7 +141,15 @@ class FileManager:
         all_files = self.find_audio_files(device_path)
         new_files = []
 
+        # Получаем имя устройства
+        device_name = Path(device_path).name
+
         for file_path in all_files:
+            # Быстрая проверка по device + filename (без MD5!)
+            if self._is_duplicate_by_device_and_name(file_path, device_name):
+                continue  # Пропускаем, уже обработан
+
+            # Только для новых файлов вычисляем хеш
             file_hash = self.calculate_file_hash(file_path)
 
             if file_hash and file_hash not in self.processed_files:

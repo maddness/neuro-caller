@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
 
 ## Проект
 
-**USB Audio Recorder Transcription Pipeline** - автоматическая система для транскрибации аудиозаписей с USB диктофонов через OpenAI Whisper API.
+**USB Audio Recorder Transcription Pipeline** - автоматическая система для транскрибации аудиозаписей с USB диктофонов через Yandex Eliza API (совместимый с OpenAI Whisper).
 
 ## Основные команды
 
@@ -26,23 +26,41 @@ sudo apt-get install ffmpeg  # Ubuntu/Debian
 
 ```bash
 cp .env.example .env
-# Отредактировать .env с вашим OpenAI API ключом
+# Отредактировать .env с вашим Yandex OAuth токеном (SOY_TOKEN)
 ```
 
 ### Запуск
 
 ```bash
-# Мониторинг USB устройств
+# Мониторинг USB устройств (основной режим)
 python main.py monitor
+python main.py monitor --check-interval 5 --language es
 
 # Обработка конкретного устройства или файла
-python main.py process /path/to/device/or/file
+python main.py process /media/usb0
+python main.py process /path/to/recording.mp3
 
 # Просмотр статистики
 python main.py stats
 
-# Поиск в транскрипциях
+# Полнотекстовый поиск в транскрипциях
 python main.py search "текст запроса"
+python main.py search "проблема" --device Agent_001 --limit 20
+```
+
+### Флаги командной строки
+
+```bash
+--log-level [DEBUG|INFO|WARNING|ERROR]  # Уровень логирования
+--log-file путь/к/логам                 # Путь к файлу логов
+--api-key токен                         # Yandex OAuth токен (SOY_TOKEN)
+--language язык                         # ISO-639-1 код (по умолчанию es)
+--chunk-length минуты                   # Длина чанка (по умолчанию 10)
+--overlap секунды                       # Overlap между чанками (по умолчанию 5)
+--check-interval секунды                # Интервал проверки USB (по умолчанию 5)
+--telegram-token токен                  # Telegram бот токен
+--telegram-chat ID                      # Telegram чат ID
+--telegram-enabled true/false           # Включить Telegram уведомления
 ```
 
 ## Архитектура
@@ -55,8 +73,9 @@ neuro-caller/
 │   ├── usb_monitor.py       # Мониторинг USB устройств
 │   ├── file_manager.py      # Управление файлами
 │   ├── audio_processor.py   # Разделение аудио на части
-│   ├── transcriber.py       # Транскрибация через Whisper API
-│   └── database.py          # SQLite база данных
+│   ├── transcriber.py       # Транскрибация через Yandex Eliza API
+│   ├── database.py          # SQLite база данных
+│   └── telegram_notifier.py # Telegram уведомления
 ├── main.py                  # Главный CLI интерфейс
 └── data/                    # Данные и база данных
 ```
@@ -82,8 +101,8 @@ neuro-caller/
 - Поддержка форматов: MP3, WAV, M4A, FLAC, OGG, AAC, WMA
 
 **WhisperTranscriber (src/transcriber.py)**
-- Транскрибация через OpenAI Whisper API
-- Поддержка любого языка (по умолчанию испанский 'es')
+- Транскрибация через Yandex Eliza API (совместимый с OpenAI Whisper)
+- Поддержка любого языка (по умолчанию русский 'ru')
 - Автоматическая обработка больших файлов с разделением
 - Объединение результатов из нескольких чанков
 
@@ -93,30 +112,50 @@ neuro-caller/
 - Статистика по устройствам и датам
 - Быстрый поиск по тексту
 
+**TelegramNotifier (src/telegram_notifier.py)**
+- Уведомления о подключении устройства
+- Отслеживание прогресса копирования и обработки
+- Уведомления об ошибках
+- Использует aiogram 3.0+ для асинхронной отправки
+
 ### Поток данных
 
+Проект использует двухэтапную обработку через класс **TranscriptionPipeline** в main.py:
+
+**ЭТАП 1: Копирование файлов**
 ```
-USB устройство
-    ↓
-USBMonitor (обнаружение)
-    ↓
-FileManager (копирование новых файлов)
-    ↓
-AudioProcessor (разделение на части если нужно)
-    ↓
-WhisperTranscriber (транскрибация через API)
-    ↓
-TranscriptionDatabase (сохранение результатов)
+USB устройство → USBMonitor → FileManager → Локальный диск
 ```
+После этого устройство можно безопасно отключить.
+
+**ЭТАП 2: Обработка и транскрибация**
+```
+Локальные файлы → AudioProcessor → WhisperTranscriber → TranscriptionDatabase
+```
+Происходит в фоновом режиме после копирования.
+
+На каждом этапе отправляются Telegram уведомления через TelegramNotifier.
 
 ## Переменные окружения (.env)
 
 ```env
-OPENAI_API_KEY=sk-...          # OpenAI API ключ
-LANGUAGE=es                     # Язык аудио (ISO-639-1)
+# Yandex Eliza API Configuration
+SOY_TOKEN=y1_...                # Yandex OAuth токен (обязательно)
+
+# Transcription Settings
+LANGUAGE=ru                     # Язык аудио (ISO-639-1)
 CHUNK_LENGTH_MINUTES=10         # Длина чанка в минутах
 OVERLAP_SECONDS=5               # Overlap между чанками
+
+# USB Monitor Settings
 CHECK_INTERVAL=5                # Интервал проверки USB устройств
+
+# Telegram Notifications (опционально)
+TELEGRAM_BOT_TOKEN=token        # Токен бота
+TELEGRAM_CHAT_ID=id            # ID чата
+TELEGRAM_ENABLED=true          # Включить уведомления
+
+# Logging
 LOG_LEVEL=INFO                  # Уровень логирования
 ```
 
@@ -137,11 +176,19 @@ LOG_LEVEL=INFO                  # Уровень логирования
 
 ## Зависимости
 
-- **openai**: OpenAI API клиент
-- **pydub**: Обработка аудио файлов
-- **psutil**: Системные утилиты (мониторинг устройств)
-- **python-dotenv**: Загрузка переменных окружения
-- **ffmpeg**: Необходим для pydub (устанавливается отдельно)
+```txt
+openai>=1.12.0         # API клиент (совместим с Yandex Eliza)
+pydub>=0.25.1          # Обработка аудио файлов
+psutil>=5.9.0          # Мониторинг устройств
+python-dotenv>=1.0.0   # Загрузка переменных окружения
+aiogram>=3.0.0         # Telegram бот (для уведомлений)
+```
+
+**Системные зависимости:**
+- **ffmpeg** - необходим для pydub:
+  - Ubuntu/Debian: `sudo apt-get install ffmpeg`
+  - MacOS: `brew install ffmpeg`
+  - Windows: скачать с https://ffmpeg.org/
 
 ## Ограничения и особенности
 
@@ -153,9 +200,7 @@ LOG_LEVEL=INFO                  # Уровень логирования
 
 ## Стоимость
 
-OpenAI Whisper API: $0.006 за минуту аудио
-- 1 час записи = $0.36
-- 8 часов (рабочий день) = $2.88
+Yandex Eliza API: Бесплатно для разработчиков (проверьте актуальные тарифы на yandex.ru/dev/eliza/)
 
 ## Разработка
 
@@ -169,6 +214,7 @@ python -m src.file_manager
 python -m src.audio_processor
 python -m src.transcriber
 python -m src.database
+python -m src.telegram_notifier
 ```
 
 ### Логирование
@@ -208,8 +254,19 @@ python main.py search "ключевое слово"
 2. **Ручная обработка**: Разовая транскрибация конкретного файла или устройства
 3. **Поиск и анализ**: Полнотекстовый поиск по всем транскрипциям в базе данных
 
-## Документация
+## Ключевые особенности архитектуры
+
+1. **Двухэтапная обработка**: Сначала копирование всех файлов (можно отключить устройство), потом обработка в фоне
+2. **Уникальная идентификация устройств**: UUID > Serial > Label > точка монтирования
+3. **MD5 хеширование**: Предотвращение повторной обработки одинаковых файлов
+4. **Overlap между чанками**: 5 секунд перекрытия для плавности транскрипции
+5. **FTS5 полнотекстовый поиск**: Быстрый поиск по всем транскрипциям
+6. **Асинхронные Telegram уведомления**: Отслеживание процесса в реальном времени
+
+## Дополнительная документация
 
 - **README.md**: Полная документация на русском языке
+- **EXAMPLE_OUTPUT.md**: Примеры вывода программы
+- **TELEGRAM_SETUP.md**: Инструкция по настройке Telegram бота
 - **Комментарии в коде**: Все модули подробно документированы
 - **Примеры**: Включены в README.md и в секциях `if __name__ == "__main__"` каждого модуля

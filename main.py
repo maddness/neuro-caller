@@ -10,6 +10,9 @@ import logging
 import argparse
 from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Добавляем src в путь
 sys.path.insert(0, str(Path(__file__).parent))
@@ -88,6 +91,72 @@ class TranscriptionPipeline:
         )
 
         self.logger.info("✅ Пайплайн готов к работе")
+
+    def save_transcription_to_file(
+        self,
+        transcription_text: str,
+        filename: str,
+        device_name: str,
+        audio_info: dict,
+        transcription_id: int
+    ):
+        """
+        Сохранение транскрипции в текстовый файл
+
+        Args:
+            transcription_text: Текст транскрипции
+            filename: Имя исходного файла
+            device_name: Имя устройства
+            audio_info: Информация об аудио
+            transcription_id: ID транскрипции в БД
+        """
+        import os
+        from datetime import datetime
+
+        # Получаем путь из .env или используем дефолт
+        output_dir = Path(os.getenv("OUTPUT_DIR", "output"))
+
+        # Создаем структуру: output/YYYY-MM-DD/DEVICE_NAME/
+        date_folder = datetime.now().strftime("%Y-%m-%d")
+        device_folder = device_name or "unknown_device"
+        output_path = output_dir / date_folder / device_folder
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Имя файла: оригинальное_имя.txt
+        text_filename = Path(filename).stem + ".txt"
+        output_file = output_path / text_filename
+
+        # Формируем содержимое файла
+        content = f"""{'='*80}
+ТРАНСКРИПЦИЯ АУДИОЗАПИСИ
+{'='*80}
+
+ID: {transcription_id}
+Файл: {filename}
+Устройство: {device_name}
+Дата обработки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Длительность: {audio_info.get('duration_minutes', 0):.2f} мин ({audio_info.get('duration_seconds', 0):.1f} сек)
+Размер файла: {audio_info.get('file_size_mb', 0):.2f} MB
+
+{'='*80}
+ТЕКСТ
+{'='*80}
+
+{transcription_text}
+
+{'='*80}
+Количество слов: {len(transcription_text.split())}
+Количество символов: {len(transcription_text)}
+{'='*80}
+"""
+
+        # Сохраняем файл
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+            self.logger.info(f"📄 Транскрипция сохранена в: {output_file}")
+        except Exception as e:
+            self.logger.error(f"Ошибка сохранения в файл {output_file}: {e}")
 
     def process_device(self, device_path: str, device_name: str = None):
         """
@@ -271,6 +340,15 @@ class TranscriptionPipeline:
             # Отмечаем файл как обработанный
             if file_hash:
                 self.file_manager.mark_as_processed(file_hash)
+
+            # Сохраняем транскрипцию в текстовый файл
+            self.save_transcription_to_file(
+                transcription_text=transcription['text'],
+                filename=filename,
+                device_name=file_info.get('device', 'unknown'),
+                audio_info=audio_info,
+                transcription_id=transcription_id
+            )
 
             word_count = len(transcription['text'].split())
             char_count = len(transcription['text'])
@@ -461,27 +539,27 @@ def main():
     monitor_parser.add_argument(
         "--check-interval",
         type=int,
-        default=5,
+        default=int(os.getenv("CHECK_INTERVAL", "5")),
         help="Интервал проверки устройств (секунды)"
     )
-    monitor_parser.add_argument("--api-key", help="OpenAI API ключ")
-    monitor_parser.add_argument("--language", default="es", help="Язык аудио (ISO-639-1)")
-    monitor_parser.add_argument("--chunk-length", type=int, default=10, help="Длина чанка (минуты)")
-    monitor_parser.add_argument("--overlap", type=int, default=5, help="Overlap (секунды)")
-    monitor_parser.add_argument("--telegram-token", help="Telegram bot token")
-    monitor_parser.add_argument("--telegram-chat", help="Telegram chat ID")
-    monitor_parser.add_argument("--telegram-enabled", type=bool, default=True, help="Включить Telegram уведомления")
+    monitor_parser.add_argument("--api-key", help="Yandex OAuth токен (SOY_TOKEN)")
+    monitor_parser.add_argument("--language", default=os.getenv("LANGUAGE", "es"), help="Язык аудио (ISO-639-1)")
+    monitor_parser.add_argument("--chunk-length", type=int, default=int(os.getenv("CHUNK_LENGTH_MINUTES", "10")), help="Длина чанка (минуты)")
+    monitor_parser.add_argument("--overlap", type=int, default=int(os.getenv("OVERLAP_SECONDS", "5")), help="Overlap (секунды)")
+    monitor_parser.add_argument("--telegram-token", default=os.getenv("TELEGRAM_BOT_TOKEN"), help="Telegram bot token")
+    monitor_parser.add_argument("--telegram-chat", default=os.getenv("TELEGRAM_CHAT_ID"), help="Telegram chat ID")
+    monitor_parser.add_argument("--telegram-enabled", type=lambda x: x.lower() == 'true', default=os.getenv("TELEGRAM_ENABLED", "true").lower() == "true", help="Включить Telegram уведомления")
 
     # Команда: process
     process_parser = subparsers.add_parser("process", help="Обработать устройство или файл")
     process_parser.add_argument("path", help="Путь к устройству или файлу")
-    process_parser.add_argument("--api-key", help="OpenAI API ключ")
-    process_parser.add_argument("--language", default="es", help="Язык аудио (ISO-639-1)")
-    process_parser.add_argument("--chunk-length", type=int, default=10, help="Длина чанка (минуты)")
-    process_parser.add_argument("--overlap", type=int, default=5, help="Overlap (секунды)")
-    process_parser.add_argument("--telegram-token", help="Telegram bot token")
-    process_parser.add_argument("--telegram-chat", help="Telegram chat ID")
-    process_parser.add_argument("--telegram-enabled", type=bool, default=True, help="Включить Telegram уведомления")
+    process_parser.add_argument("--api-key", help="Yandex OAuth токен (SOY_TOKEN)")
+    process_parser.add_argument("--language", default=os.getenv("LANGUAGE", "es"), help="Язык аудио (ISO-639-1)")
+    process_parser.add_argument("--chunk-length", type=int, default=int(os.getenv("CHUNK_LENGTH_MINUTES", "10")), help="Длина чанка (минуты)")
+    process_parser.add_argument("--overlap", type=int, default=int(os.getenv("OVERLAP_SECONDS", "5")), help="Overlap (секунды)")
+    process_parser.add_argument("--telegram-token", default=os.getenv("TELEGRAM_BOT_TOKEN"), help="Telegram bot token")
+    process_parser.add_argument("--telegram-chat", default=os.getenv("TELEGRAM_CHAT_ID"), help="Telegram chat ID")
+    process_parser.add_argument("--telegram-enabled", type=lambda x: x.lower() == 'true', default=os.getenv("TELEGRAM_ENABLED", "true").lower() == "true", help="Включить Telegram уведомления")
 
     # Команда: stats
     stats_parser = subparsers.add_parser("stats", help="Показать статистику")

@@ -1,5 +1,5 @@
 """
-Транскрибация аудио через OpenAI Whisper API
+Транскрибация аудио через Yandex Eliza API (совместимый с OpenAI Whisper)
 """
 
 import os
@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import List, Optional, Dict
 from openai import OpenAI, OpenAIError
 import json
+import httpx
 
 logger = logging.getLogger(__name__)
 
 
 class WhisperTranscriber:
-    """Транскрибация аудио через OpenAI Whisper API"""
+    """Транскрибация аудио через Yandex Eliza API (совместимый с OpenAI Whisper)"""
 
     # Поддерживаемые форматы Whisper API
     SUPPORTED_FORMATS = {'mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm'}
@@ -25,21 +26,31 @@ class WhisperTranscriber:
     def __init__(self, api_key: str = None, language: str = "es", model: str = "whisper-1"):
         """
         Args:
-            api_key: OpenAI API ключ (если None, берется из env)
-            language: Язык аудио (ISO-639-1 код, например 'es' для испанского)
+            api_key: Yandex OAuth токен (если None, берется из env SOY_TOKEN)
+            language: Язык аудио (ISO-639-1 код, например 'ru' для русского)
             model: Модель Whisper (whisper-1)
         """
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key or os.getenv("SOY_TOKEN")
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY не задан")
+            raise ValueError("SOY_TOKEN не задан")
 
         self.language = language
         self.model = model
 
-        # Инициализируем клиент OpenAI
-        self.client = OpenAI(api_key=self.api_key)
+        # Yandex Eliza API base URL
+        self.base_url = "https://api.eliza.yandex.net/raw/openai/v1/"
 
-        logger.info(f"WhisperTranscriber инициализирован: язык={language}, модель={model}")
+        # Создаем HTTP клиент с отключенной SSL проверкой (для самоподписанных сертификатов)
+        http_client = httpx.Client(verify=False)
+
+        # Инициализируем клиент с Yandex Eliza endpoint
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            http_client=http_client
+        )
+
+        logger.info(f"WhisperTranscriber инициализирован: язык={language}, модель={model}, API=Yandex Eliza")
 
     def transcribe_file(
         self,
@@ -122,7 +133,7 @@ class WhisperTranscriber:
             return result
 
         except OpenAIError as e:
-            logger.error(f"❌ Ошибка OpenAI API для {audio_path.name}: {e}")
+            logger.error(f"❌ Ошибка Eliza API для {audio_path.name}: {e}")
             raise
 
         except Exception as e:

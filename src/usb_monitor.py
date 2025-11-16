@@ -42,9 +42,12 @@ class USBMonitor:
             mount_point = partition.mountpoint
 
             # В Linux USB обычно монтируются в /media или /mnt
-            if '/media' in mount_point or '/mnt' in mount_point:
-                if os.path.exists(mount_point) and os.path.isdir(mount_point):
-                    devices.append(mount_point)
+            # В macOS USB монтируются в /Volumes
+            if '/media' in mount_point or '/mnt' in mount_point or '/Volumes' in mount_point:
+                # Исключаем системный диск macOS
+                if mount_point not in ['/', '/Volumes/Macintosh HD']:
+                    if os.path.exists(mount_point) and os.path.isdir(mount_point):
+                        devices.append(mount_point)
             # Дополнительная проверка для removable устройств
             elif partition.device.startswith('/dev/sd'):
                 try:
