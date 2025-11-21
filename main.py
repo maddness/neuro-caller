@@ -20,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.usb_monitor import USBMonitor
 from src.file_manager import FileManager
 from src.audio_processor import AudioProcessor
-from src.transcriber import WhisperTranscriber
 from src.assemblyai_transcriber import AssemblyAITranscriber
 from src.database import TranscriptionDatabase
 from src.telegram_notifier import TelegramNotifier
@@ -51,12 +50,8 @@ class TranscriptionPipeline:
 
     def __init__(
         self,
-        openai_api_key: str = None,
         assemblyai_api_key: str = None,
-        use_assemblyai: bool = False,
         language: str = "es",
-        chunk_length_minutes: int = 10,
-        overlap_seconds: int = 5,
         num_speakers: int = 2,
         telegram_bot_token: str = None,
         telegram_chat_id: str = None,
@@ -74,12 +69,8 @@ class TranscriptionPipeline:
     ):
         """
         Args:
-            openai_api_key: OpenAI/Yandex Eliza API ключ
-            assemblyai_api_key: AssemblyAI API ключ (для diarization)
-            use_assemblyai: Использовать AssemblyAI вместо Whisper
+            assemblyai_api_key: AssemblyAI API ключ
             language: Язык аудио (ISO-639-1)
-            chunk_length_minutes: Длина чанка в минутах
-            overlap_seconds: Overlap между чанками в секундах
             num_speakers: Количество говорящих (для diarization)
             telegram_bot_token: Токен Telegram бота
             telegram_chat_id: ID чата для уведомлений
@@ -100,7 +91,6 @@ class TranscriptionPipeline:
         # Инициализация компонентов
         self.logger.info("Инициализация компонентов пайплайна...")
 
-        self.use_assemblyai = use_assemblyai
         self.num_speakers = num_speakers
 
         # S3 параметры
@@ -109,24 +99,14 @@ class TranscriptionPipeline:
         self.s3_presigned_url_expiry = s3_presigned_url_expiry
 
         self.file_manager = FileManager()
-        self.audio_processor = AudioProcessor(
-            chunk_length_ms=chunk_length_minutes * 60 * 1000,
-            overlap_ms=overlap_seconds * 1000
-        )
+        self.audio_processor = AudioProcessor()
 
-        # Выбираем транскрайбер
-        if use_assemblyai:
-            self.transcriber = AssemblyAITranscriber(
-                api_key=assemblyai_api_key,
-                language=language
-            )
-            self.logger.info("Используется AssemblyAI (с diarization)")
-        else:
-            self.transcriber = WhisperTranscriber(
-                api_key=openai_api_key,
-                language=language
-            )
-            self.logger.info("Используется Whisper/Yandex Eliza (без diarization)")
+        # Транскрайбер AssemblyAI
+        self.transcriber = AssemblyAITranscriber(
+            api_key=assemblyai_api_key,
+            language=language
+        )
+        self.logger.info("Используется AssemblyAI (с diarization)")
 
         self.database = TranscriptionDatabase()
 
@@ -234,8 +214,7 @@ ID: {transcription_id}
         # Форматируем текст с учетом diarization
         if transcription and 'segments' in transcription and transcription.get('segments'):
             # С разделением по говорящим и таймстемпами
-            # Используем метод format_transcript_text из AssemblyAITranscriber
-            if self.use_assemblyai and hasattr(self.transcriber, 'format_transcript_text'):
+            if hasattr(self.transcriber, 'format_transcript_text'):
                 formatted_text = self.transcriber.format_transcript_text(transcription, filename=filename)
                 content += formatted_text
             else:
@@ -444,74 +423,33 @@ ID: {transcription_id}
                 size_mb=audio_info['file_size_mb']
             )
 
-            # Транскрибация с учетом выбранного API
-            if self.use_assemblyai:
-                self.logger.info("🎤 Отправка в AssemblyAI для транскрибации с diarization...")
-                transcription = self.transcriber.transcribe_with_speakers(
-                    file_path,
-                    num_speakers=self.num_speakers
-                )
-            else:
-                self.logger.info("🎤 Отправка в Whisper API для транскрибации...")
-                transcription = self.transcriber.transcribe_file_with_splitting(
-                    file_path,
-                    audio_processor=self.audio_processor,
-                    save_chunks=False  # Удаляем временные чанки
-                )
+            # Транскрибация через AssemblyAI
+            self.logger.info("🎤 Отправка в AssemblyAI для транскрибации с diarization...")
+            transcription = self.transcriber.transcribe_with_speakers(
+                file_path,
+                num_speakers=self.num_speakers
+            )
 
             # Сохранение в базу данных
             self.logger.info("💾 Сохранение транскрипции в БД...")
 
-            # Сохраняем с учетом diarization или без
-            if self.use_assemblyai and 'segments' in transcription:
-                # С diarization
-                transcription_id = self.database.add_transcription_with_speakers(
-                    file_hash=file_key or "",
-                    original_filename=file_info['original_path'],
-                    audio_file_path=str(file_path),
-                    transcription_text=transcription['text'],
-                    speaker_segments=transcription['segments'],
-                    device_name=file_info.get('device'),
-                    language=transcription.get('language', 'ru'),
-                    duration_seconds=audio_info.get('duration_seconds'),
-                    metadata={
-                        'file_size_mb': audio_info.get('file_size_mb'),
-                        'channels': audio_info.get('channels'),
-                        'sample_rate': audio_info.get('frame_rate'),
-                        'total_speakers': transcription.get('total_speakers'),
-                        'speaker_stats': transcription.get('speaker_stats')
-                    }
-                )
-            else:
-                # Без diarization (Whisper)
-                chunks_data = None
-                if 'chunks' in transcription:
-                    chunks_data = [
-                        {
-                            'chunk_number': i,
-                            'text': chunk.get('text', ''),
-                            'start_ms': None,
-                            'end_ms': None
-                        }
-                        for i, chunk in enumerate(transcription['chunks'], 1)
-                    ]
-
-                transcription_id = self.database.add_transcription(
-                    file_hash=file_key or "",
-                    original_filename=file_info['original_path'],
-                    audio_file_path=str(file_path),
-                    transcription_text=transcription['text'],
-                    device_name=file_info.get('device'),
-                    language=transcription.get('language', 'es'),
-                    duration_seconds=audio_info.get('duration_seconds'),
-                    metadata={
-                        'file_size_mb': audio_info.get('file_size_mb'),
-                        'channels': audio_info.get('channels'),
-                        'sample_rate': audio_info.get('frame_rate'),
-                        'total_chunks': transcription.get('total_chunks', 1)
-                    },
-                    chunks=chunks_data
-                )
+            transcription_id = self.database.add_transcription_with_speakers(
+                file_hash=file_key or "",
+                original_filename=file_info['original_path'],
+                audio_file_path=str(file_path),
+                transcription_text=transcription['text'],
+                speaker_segments=transcription.get('segments', []),
+                device_name=file_info.get('device'),
+                language=transcription.get('language', 'ru'),
+                duration_seconds=audio_info.get('duration_seconds'),
+                metadata={
+                    'file_size_mb': audio_info.get('file_size_mb'),
+                    'channels': audio_info.get('channels'),
+                    'sample_rate': audio_info.get('frame_rate'),
+                    'total_speakers': transcription.get('total_speakers'),
+                    'speaker_stats': transcription.get('speaker_stats')
+                }
+            )
 
             # Отмечаем файл как обработанный
             if file_key:
@@ -538,11 +476,9 @@ ID: {transcription_id}
             speaker_stats = transcription.get('speaker_stats') if transcription else None
 
             # Форматируем текст с таймстемпами и разбивкой по говорящим для Telegram
-            if self.use_assemblyai and transcription and 'segments' in transcription:
-                # Для AssemblyAI используем форматированный текст с таймстемпами
+            if transcription and 'segments' in transcription:
                 transcription_text = self.transcriber.format_transcript_text(transcription, filename=filename)
             else:
-                # Для обычной транскрипции без diarization
                 transcription_text = transcription.get('text', '') if transcription else ''
 
             self.telegram.notify_transcription_complete(
@@ -571,12 +507,8 @@ def monitor_mode(args):
     logger.info("Запуск режима мониторинга USB устройств...")
 
     pipeline = TranscriptionPipeline(
-        openai_api_key=args.api_key,
         assemblyai_api_key=getattr(args, 'assemblyai_api_key', None),
-        use_assemblyai=getattr(args, 'use_assemblyai', False),
         language=args.language,
-        chunk_length_minutes=args.chunk_length,
-        overlap_seconds=args.overlap,
         num_speakers=getattr(args, 'num_speakers', 2),
         telegram_bot_token=args.telegram_token,
         telegram_chat_id=args.telegram_chat,
@@ -629,12 +561,8 @@ def process_mode(args):
     logger = logging.getLogger("process_mode")
 
     pipeline = TranscriptionPipeline(
-        openai_api_key=args.api_key,
         assemblyai_api_key=getattr(args, 'assemblyai_api_key', None),
-        use_assemblyai=getattr(args, 'use_assemblyai', False),
         language=args.language,
-        chunk_length_minutes=args.chunk_length,
-        overlap_seconds=args.overlap,
         num_speakers=getattr(args, 'num_speakers', 2),
         telegram_bot_token=args.telegram_token,
         telegram_chat_id=args.telegram_chat,
@@ -768,13 +696,9 @@ def main():
         default=int(os.getenv("CHECK_INTERVAL", "5")),
         help="Интервал проверки устройств (секунды)"
     )
-    monitor_parser.add_argument("--api-key", help="Yandex OAuth токен (SOY_TOKEN)")
     monitor_parser.add_argument("--assemblyai-api-key", default=os.getenv("ASSEMBLYAI_API_KEY"), help="AssemblyAI API ключ")
-    monitor_parser.add_argument("--use-assemblyai", type=lambda x: x.lower() == 'true', default=os.getenv("USE_ASSEMBLYAI", "false").lower() == "true", help="Использовать AssemblyAI (с diarization)")
     monitor_parser.add_argument("--num-speakers", type=int, default=int(os.getenv("DEFAULT_NUM_SPEAKERS", "2")), help="Количество говорящих")
     monitor_parser.add_argument("--language", default=os.getenv("LANGUAGE", "es"), help="Язык аудио (ISO-639-1)")
-    monitor_parser.add_argument("--chunk-length", type=int, default=int(os.getenv("CHUNK_LENGTH_MINUTES", "10")), help="Длина чанка (минуты)")
-    monitor_parser.add_argument("--overlap", type=int, default=int(os.getenv("OVERLAP_SECONDS", "5")), help="Overlap (секунды)")
     monitor_parser.add_argument("--telegram-token", default=os.getenv("TELEGRAM_BOT_TOKEN"), help="Telegram bot token")
     monitor_parser.add_argument("--telegram-chat", default=os.getenv("TELEGRAM_CHAT_ID"), help="Telegram chat ID")
     monitor_parser.add_argument("--telegram-enabled", type=lambda x: x.lower() == 'true', default=os.getenv("TELEGRAM_ENABLED", "true").lower() == "true", help="Включить Telegram уведомления")
@@ -793,13 +717,9 @@ def main():
     process_parser = subparsers.add_parser("process", help="Обработать устройство или файл")
     process_parser.add_argument("path", help="Путь к устройству или файлу")
     process_parser.add_argument("--force", "-f", action="store_true", help="Перезаписать существующую транскрипцию")
-    process_parser.add_argument("--api-key", help="Yandex OAuth токен (SOY_TOKEN)")
     process_parser.add_argument("--assemblyai-api-key", default=os.getenv("ASSEMBLYAI_API_KEY"), help="AssemblyAI API ключ")
-    process_parser.add_argument("--use-assemblyai", type=lambda x: x.lower() == 'true', default=os.getenv("USE_ASSEMBLYAI", "false").lower() == "true", help="Использовать AssemblyAI (с diarization)")
     process_parser.add_argument("--num-speakers", type=int, default=int(os.getenv("DEFAULT_NUM_SPEAKERS", "2")), help="Количество говорящих")
     process_parser.add_argument("--language", default=os.getenv("LANGUAGE", "es"), help="Язык аудио (ISO-639-1)")
-    process_parser.add_argument("--chunk-length", type=int, default=int(os.getenv("CHUNK_LENGTH_MINUTES", "10")), help="Длина чанка (минуты)")
-    process_parser.add_argument("--overlap", type=int, default=int(os.getenv("OVERLAP_SECONDS", "5")), help="Overlap (секунды)")
     process_parser.add_argument("--telegram-token", default=os.getenv("TELEGRAM_BOT_TOKEN"), help="Telegram bot token")
     process_parser.add_argument("--telegram-chat", default=os.getenv("TELEGRAM_CHAT_ID"), help="Telegram chat ID")
     process_parser.add_argument("--telegram-enabled", type=lambda x: x.lower() == 'true', default=os.getenv("TELEGRAM_ENABLED", "true").lower() == "true", help="Включить Telegram уведомления")
