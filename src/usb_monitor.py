@@ -24,6 +24,7 @@ class USBMonitor:
         """
         self.check_interval = check_interval
         self.known_devices: Set[str] = set()
+        self.processing_devices: Set[str] = set()  # Устройства в процессе обработки
         self._initialize_known_devices()
 
     def _initialize_known_devices(self):
@@ -100,10 +101,27 @@ class USBMonitor:
 
                 if new_devices and callback:
                     for device in new_devices:
+                        # Проверяем что устройство не обрабатывается в данный момент
+                        if device in self.processing_devices:
+                            logger.info(f"⚠️  Устройство {device} уже обрабатывается, пропускаем")
+                            continue
+
                         try:
+                            # Добавляем устройство в список обрабатываемых
+                            self.processing_devices.add(device)
+                            logger.debug(f"Начата обработка устройства {device}")
+
+                            # Вызываем callback для обработки устройства
                             callback(device)
+
+                            # Удаляем из списка обрабатываемых после завершения
+                            self.processing_devices.discard(device)
+                            logger.debug(f"Завершена обработка устройства {device}")
+
                         except Exception as e:
                             logger.error(f"Ошибка обработки устройства {device}: {e}")
+                            # Обязательно удаляем из списка обрабатываемых при ошибке
+                            self.processing_devices.discard(device)
 
                 time.sleep(self.check_interval)
 

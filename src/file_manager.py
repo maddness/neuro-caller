@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import List, Set, Dict
+from typing import List, Set, Dict, Optional, Tuple
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,12 @@ class FileManager:
 
         # Загружаем БД обработанных файлов
         self.processed_files = self._load_processed_files()
+
+        # S3 uploader (будет установлен из main.py если S3_ENABLED=true)
+        self.s3_uploader = None
+
+        # Telegram notifier (будет установлен из main.py)
+        self.telegram_notifier = None
 
     def _load_processed_files(self) -> Dict[str, dict]:
         """Загрузка БД обработанных файлов"""
@@ -145,29 +151,30 @@ class FileManager:
         device_name = Path(device_path).name
 
         for file_path in all_files:
-            # Быстрая проверка по device + filename (без MD5!)
-            if self._is_duplicate_by_device_and_name(file_path, device_name):
-                continue  # Пропускаем, уже обработан
-
-            # Только для новых файлов вычисляем хеш
-            file_hash = self.calculate_file_hash(file_path)
-
-            if file_hash and file_hash not in self.processed_files:
+            # Быстрая проверка по device + filename (БЕЗ вычисления MD5!)
+            if not self._is_duplicate_by_device_and_name(file_path, device_name):
                 new_files.append(file_path)
 
         logger.info(f"Обнаружено {len(new_files)} новых файлов")
         return new_files
 
-    def copy_file(self, source_path: Path, device_name: str = None) -> Path:
+    def copy_file(self, source_path: Path, device_name: str = None, storage_class: str = "STANDARD") -> Dict:
         """
-        Копирование файла в локальное хранилище
+        Копирование файла в локальное хранилище и загрузка в S3 (если включено)
 
         Args:
             source_path: Путь к исходному файлу
             device_name: Имя устройства (для организации)
+            storage_class: Класс хранилища S3 (STANDARD, COLD, ICE)
 
         Returns:
-            Путь к скопированному файлу
+            Словарь с информацией о файле:
+            {
+                'local_path': Path,
+                's3_key': str или None,
+                's3_uploaded': bool,
+                's3_url': str или None
+            }
         """
         # Создаем структуру директорий: YYYY-MM-DD/device_name/
         date_folder = datetime.now().strftime("%Y-%m-%d")
@@ -185,10 +192,52 @@ class FileManager:
             destination_path = destination_dir / f"{stem}_{counter}{suffix}"
             counter += 1
 
+        # Результат
+        result = {
+            'local_path': None,
+            's3_key': None,
+            's3_uploaded': False,
+            's3_url': None
+        }
+
         try:
+            # ЭТАП 1: Копируем файл на локальный диск
             shutil.copy2(source_path, destination_path)
             logger.info(f"Файл скопирован: {source_path.name} -> {destination_path}")
-            return destination_path
+            result['local_path'] = destination_path
+
+            # ЭТАП 2: Загружаем в S3 (если включено)
+            if self.s3_uploader:
+                # Формируем S3 ключ: YYYY_MM_DD/device_name/filename
+                # ВАЖНО: Дата с подчеркиваниями, не дефисами!
+                date_underscored = datetime.now().strftime("%Y_%m_%d")
+                s3_key = f"{date_underscored}/{device_folder}/{destination_path.name}"
+
+                # Метаданные для файла в S3
+                metadata = {
+                    'device': device_folder,
+                    'original_filename': source_path.name,
+                    'upload_date': datetime.now().isoformat()
+                }
+
+                logger.info(f"Загрузка в S3: {s3_key}")
+
+                # Загружаем файл в S3
+                s3_success = self.s3_uploader.upload_file(
+                    file_path=destination_path,
+                    s3_key=s3_key,
+                    storage_class=storage_class,
+                    metadata=metadata
+                )
+
+                if s3_success:
+                    result['s3_key'] = s3_key
+                    result['s3_uploaded'] = True
+                    logger.info(f"✓ Файл загружен в S3: {s3_key}")
+                else:
+                    logger.warning(f"⚠ Не удалось загрузить файл в S3: {s3_key}")
+
+            return result
 
         except Exception as e:
             logger.error(f"Ошибка копирования файла {source_path}: {e}")
@@ -218,6 +267,17 @@ class FileManager:
         logger.info(f"   С флешки: {device_path}")
         logger.info(f"   На диск: {self.local_storage_path}\n")
 
+        # Вычисляем общий размер для уведомления
+        total_size_bytes = sum(f.stat().st_size for f in new_files)
+        total_size_mb_estimate = total_size_bytes / (1024 * 1024)
+
+        # Telegram: уведомление о начале копирования
+        if self.telegram_notifier:
+            self.telegram_notifier.notify_copying_started(
+                files_count=len(new_files),
+                total_size_mb=total_size_mb_estimate
+            )
+
         copied_files = []
         total_size_mb = 0
 
@@ -226,11 +286,12 @@ class FileManager:
                 file_size_mb = source_file.stat().st_size / (1024 * 1024)
                 logger.info(f"   [{i}/{len(new_files)}] Копирую: {source_file.name} ({file_size_mb:.1f} MB)")
 
-                # Копируем файл
-                destination_path = self.copy_file(source_file, device_name)
+                # Копируем файл (и загружаем в S3 если включено)
+                copy_result = self.copy_file(source_file, device_name)
+                destination_path = copy_result['local_path']
 
-                # Вычисляем хеш
-                file_hash = self.calculate_file_hash(source_file)
+                # Формируем уникальный ключ: device_filename
+                file_key = f"{device_name}_{source_file.name}"
 
                 # Регистрируем в БД
                 file_info = {
@@ -239,14 +300,19 @@ class FileManager:
                     "device": device_name,
                     "size_bytes": source_file.stat().st_size,
                     "copied_at": datetime.now().isoformat(),
-                    "processed": False
+                    "processed": False,
+                    # S3 информация
+                    "s3_key": copy_result.get('s3_key'),
+                    "s3_uploaded": copy_result.get('s3_uploaded', False)
                 }
 
-                self.processed_files[file_hash] = file_info
+                self.processed_files[file_key] = file_info
                 copied_files.append(file_info)
                 total_size_mb += file_size_mb
 
                 logger.info(f"        ✓ Скопирован в: {destination_path.relative_to(self.local_storage_path)}")
+                if copy_result.get('s3_uploaded'):
+                    logger.info(f"        ✓ Загружен в S3: {copy_result['s3_key']}")
 
             except Exception as e:
                 logger.error(f"        ✗ Ошибка: {e}")
@@ -257,16 +323,16 @@ class FileManager:
         logger.info(f"\n📊 Итого скопировано: {len(copied_files)}/{len(new_files)} файлов, {total_size_mb:.1f} MB")
         return copied_files
 
-    def mark_as_processed(self, file_hash: str):
+    def mark_as_processed(self, file_key: str):
         """
         Отметить файл как обработанный (транскрибированный)
 
         Args:
-            file_hash: MD5 хеш файла
+            file_key: Ключ файла (device_filename)
         """
-        if file_hash in self.processed_files:
-            self.processed_files[file_hash]["processed"] = True
-            self.processed_files[file_hash]["processed_at"] = datetime.now().isoformat()
+        if file_key in self.processed_files:
+            self.processed_files[file_key]["processed"] = True
+            self.processed_files[file_key]["processed_at"] = datetime.now().isoformat()
             self._save_processed_files()
 
     def get_unprocessed_files(self) -> List[Dict]:
@@ -277,9 +343,9 @@ class FileManager:
             Список информации о необработанных файлах
         """
         unprocessed = []
-        for file_hash, file_info in self.processed_files.items():
+        for file_key, file_info in self.processed_files.items():
             if not file_info.get("processed", False):
-                file_info["hash"] = file_hash
+                file_info["file_key"] = file_key
                 unprocessed.append(file_info)
 
         return unprocessed

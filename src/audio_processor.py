@@ -216,33 +216,6 @@ class AudioProcessor:
 
         return chunk_paths
 
-    def estimate_chunks_count(self, file_path: Path) -> int:
-        """
-        Оценка количества чанков без полной загрузки файла
-
-        Args:
-            file_path: Путь к аудиофайлу
-
-        Returns:
-            Примерное количество чанков
-        """
-        try:
-            audio = self.load_audio(file_path)
-            total_length = len(audio)
-
-            # Вычисляем количество чанков
-            if total_length <= self.chunk_length_ms:
-                return 1
-
-            effective_chunk_length = self.chunk_length_ms - self.overlap_ms
-            chunks_count = (total_length - self.chunk_length_ms) // effective_chunk_length + 1
-
-            return chunks_count
-
-        except Exception as e:
-            logger.error(f"Ошибка оценки количества чанков для {file_path}: {e}")
-            return 0
-
     @staticmethod
     def get_audio_info(file_path: Path) -> dict:
         """

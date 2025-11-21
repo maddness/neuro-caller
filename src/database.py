@@ -63,6 +63,7 @@ class TranscriptionDatabase:
                     language TEXT DEFAULT 'es',
                     duration_seconds REAL,
                     word_count INTEGER,
+                    has_diarization BOOLEAN DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     metadata TEXT
@@ -82,6 +83,20 @@ class TranscriptionDatabase:
                 )
             """)
 
+            # Таблица сегментов говорящих (для diarization)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS speaker_segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    transcription_id INTEGER NOT NULL,
+                    speaker_label TEXT NOT NULL,
+                    start_time REAL NOT NULL,
+                    end_time REAL NOT NULL,
+                    text TEXT NOT NULL,
+                    confidence REAL,
+                    FOREIGN KEY (transcription_id) REFERENCES transcriptions (id)
+                )
+            """)
+
             # Индексы для быстрого поиска
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_file_hash
@@ -96,6 +111,11 @@ class TranscriptionDatabase:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_created_at
                 ON transcriptions(created_at)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_speaker_segments_transcription
+                ON speaker_segments(transcription_id)
             """)
 
             # Таблица для полнотекстового поиска (FTS5)
@@ -192,6 +212,127 @@ class TranscriptionDatabase:
             logger.error(f"Ошибка добавления транскрипции: {e}")
             raise
 
+    def add_transcription_with_speakers(
+        self,
+        file_hash: str,
+        original_filename: str,
+        audio_file_path: str,
+        transcription_text: str,
+        speaker_segments: List[Dict],
+        device_name: str = None,
+        language: str = "ru",
+        duration_seconds: float = None,
+        metadata: Dict = None
+    ) -> int:
+        """
+        Добавление транскрипции с разделением по говорящим
+
+        Args:
+            file_hash: MD5 хеш аудиофайла
+            original_filename: Оригинальное имя файла
+            audio_file_path: Путь к аудиофайлу
+            transcription_text: Полный текст транскрипции
+            speaker_segments: Список сегментов с говорящими
+            device_name: Имя устройства
+            language: Язык аудио
+            duration_seconds: Длительность аудио
+            metadata: Дополнительные метаданные
+
+        Returns:
+            ID созданной записи
+        """
+        try:
+            word_count = len(transcription_text.split())
+            metadata_json = json.dumps(metadata) if metadata else None
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Добавляем транскрипцию с флагом diarization
+                cursor.execute("""
+                    INSERT INTO transcriptions (
+                        file_hash, original_filename, device_name, audio_file_path,
+                        transcription_text, language, duration_seconds, word_count,
+                        has_diarization, metadata
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    file_hash, original_filename, device_name, audio_file_path,
+                    transcription_text, language, duration_seconds, word_count,
+                    1,  # has_diarization = True
+                    metadata_json
+                ))
+
+                transcription_id = cursor.lastrowid
+
+                # Добавляем в FTS таблицу
+                cursor.execute("""
+                    INSERT INTO transcriptions_fts (transcription_id, transcription_text)
+                    VALUES (?, ?)
+                """, (transcription_id, transcription_text))
+
+                # Добавляем сегменты говорящих
+                for segment in speaker_segments:
+                    cursor.execute("""
+                        INSERT INTO speaker_segments (
+                            transcription_id, speaker_label, start_time, end_time,
+                            text, confidence
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        transcription_id,
+                        segment.get('speaker'),
+                        segment.get('start'),
+                        segment.get('end'),
+                        segment.get('text', ''),
+                        segment.get('confidence')
+                    ))
+
+                logger.info(f"✅ Транскрипция с diarization добавлена: ID={transcription_id}, "
+                          f"сегментов={len(speaker_segments)}, файл={original_filename}")
+
+                return transcription_id
+
+        except sqlite3.IntegrityError as e:
+            logger.warning(f"Транскрипция уже существует: {file_hash}")
+            raise
+
+        except Exception as e:
+            logger.error(f"Ошибка добавления транскрипции с diarization: {e}")
+            raise
+
+    def get_speaker_segments(self, transcription_id: int) -> List[Dict]:
+        """
+        Получение сегментов говорящих для транскрипции
+
+        Args:
+            transcription_id: ID транскрипции
+
+        Returns:
+            Список сегментов с говорящими
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT speaker_label, start_time, end_time, text, confidence
+                FROM speaker_segments
+                WHERE transcription_id = ?
+                ORDER BY start_time
+            """, (transcription_id,))
+
+            rows = cursor.fetchall()
+
+            segments = []
+            for row in rows:
+                segments.append({
+                    'speaker': row['speaker_label'],
+                    'start': row['start_time'],
+                    'end': row['end_time'],
+                    'text': row['text'],
+                    'confidence': row['confidence']
+                })
+
+            return segments
+
     def get_transcription(self, transcription_id: int) -> Optional[Dict]:
         """
         Получение транскрипции по ID
@@ -215,6 +356,44 @@ class TranscriptionDatabase:
                 return dict(row)
 
             return None
+
+    def delete_by_file_hash(self, file_hash: str) -> bool:
+        """
+        Удаление транскрипции по file_hash (для --force перезаписи)
+
+        Args:
+            file_hash: Хеш/ключ файла
+
+        Returns:
+            True если удалено, False если не найдено
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Находим ID транскрипции
+            cursor.execute("SELECT id FROM transcriptions WHERE file_hash = ?", (file_hash,))
+            row = cursor.fetchone()
+
+            if not row:
+                return False
+
+            transcription_id = row['id']
+
+            # Удаляем сегменты говорящих
+            cursor.execute("DELETE FROM speaker_segments WHERE transcription_id = ?", (transcription_id,))
+
+            # Удаляем чанки
+            cursor.execute("DELETE FROM transcription_chunks WHERE transcription_id = ?", (transcription_id,))
+
+            # Удаляем из FTS индекса
+            cursor.execute("DELETE FROM transcriptions_fts WHERE transcription_id = ?", (transcription_id,))
+
+            # Удаляем транскрипцию
+            cursor.execute("DELETE FROM transcriptions WHERE id = ?", (transcription_id,))
+
+            conn.commit()
+            logger.info(f"🗑️ Удалена транскрипция: ID={transcription_id}, file_hash={file_hash}")
+            return True
 
     def search_transcriptions(
         self,

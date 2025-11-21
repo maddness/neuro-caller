@@ -16,10 +16,12 @@
 
 - ✅ **Автоматическое обнаружение** USB диктофонов
 - ✅ **Умное копирование** - только новые файлы
+- ✅ **S3 Object Storage** - автоматическая загрузка файлов в облако (Yandex, AWS, MinIO)
 - ✅ **Разделение больших файлов** на части с overlap
-- ✅ **Транскрибация** через OpenAI Whisper API
+- ✅ **Транскрибация** через Yandex Eliza API (Whisper-совместимый)
+- ✅ **Speaker Diarization** - разделение по говорящим через AssemblyAI
 - ✅ **База данных** SQLite с полнотекстовым поиском
-- ✅ **Telegram уведомления** о каждом этапе обработки
+- ✅ **Telegram уведомления** о каждом этапе обработки + ссылки на скачивание из S3
 - ✅ **Поддержка форматов**: MP3, WAV, M4A, FLAC, OGG, AAC, WMA
 - ✅ **Многоязычность** - по умолчанию испанский (es)
 - ✅ **CLI интерфейс** для всех операций
@@ -94,10 +96,17 @@ nano .env
 
 Содержимое `.env`:
 ```env
-OPENAI_API_KEY=sk-your-key-here
-LANGUAGE=es
+# Yandex Eliza API (Whisper-совместимый)
+SOY_TOKEN=y1_your-yandex-oauth-token-here
+
+# AssemblyAI для speaker diarization (опционально)
+ASSEMBLYAI_API_KEY=your-assemblyai-api-key-here
+USE_ASSEMBLYAI=false  # true для использования AssemblyAI с diarization
+DEFAULT_NUM_SPEAKERS=2
+
+LANGUAGE=ru
 CHUNK_LENGTH_MINUTES=10
-OVERLAP_SECONDS=5
+OVERLAP_SECONDS=10
 CHECK_INTERVAL=5
 LOG_LEVEL=INFO
 
@@ -105,6 +114,16 @@ LOG_LEVEL=INFO
 TELEGRAM_BOT_TOKEN=your-telegram-bot-token
 TELEGRAM_CHAT_ID=your-telegram-chat-id
 TELEGRAM_ENABLED=true
+
+# S3 Object Storage (опционально)
+S3_ENABLED=false
+S3_ENDPOINT_URL=https://storage.yandexcloud.net
+S3_ACCESS_KEY_ID=your-access-key-id
+S3_SECRET_ACCESS_KEY=your-secret-access-key
+S3_BUCKET_NAME=neuro-caller-audio
+S3_REGION_NAME=ru-central1
+S3_STORAGE_CLASS=STANDARD
+S3_PRESIGNED_URL_EXPIRY=604800
 ```
 
 **Настройка Telegram уведомлений (опционально):**
@@ -115,6 +134,61 @@ TELEGRAM_ENABLED=true
 1. Создайте бота через [@BotFather](https://t.me/botfather)
 2. Получите Chat ID через [@userinfobot](https://t.me/userinfobot)
 3. Добавьте в `.env` файл
+
+**Настройка S3 Object Storage (опционально):**
+
+Система может автоматически загружать аудиофайлы в S3-совместимое хранилище (Yandex Object Storage, AWS S3, MinIO) сразу после копирования с USB.
+
+Преимущества:
+- 📤 **Автоматическая загрузка** файлов в облако
+- 🔗 **Ссылки для скачивания** в Telegram уведомлениях (действительны 7 дней)
+- ☁️ **Надежное хранение** с резервным копированием
+- 💰 **Экономия места** на локальном диске (опционально)
+
+Быстрая настройка для **Yandex Object Storage**:
+
+1. Создайте бакет в [Yandex Object Storage](https://console.cloud.yandex.ru/folders/XXX/storage)
+2. Создайте сервисный аккаунт и статический ключ доступа
+3. Добавьте параметры в `.env`:
+
+```env
+# Включить S3 загрузку
+S3_ENABLED=true
+
+# Yandex Object Storage
+S3_ENDPOINT_URL=https://storage.yandexcloud.net
+S3_REGION_NAME=ru-central1
+S3_ACCESS_KEY_ID=your-access-key-id
+S3_SECRET_ACCESS_KEY=your-secret-access-key
+S3_BUCKET_NAME=neuro-caller-audio
+
+# Класс хранилища (STANDARD, COLD, ICE)
+S3_STORAGE_CLASS=STANDARD
+
+# Время жизни ссылок для скачивания (7 дней)
+S3_PRESIGNED_URL_EXPIRY=604800
+```
+
+**Структура файлов в S3:**
+```
+neuro-caller-audio/
+├── 2025_11_20/
+│   ├── PERU_003/
+│   │   ├── R20251115-162324.WAV
+│   │   └── R20251115-165530.WAV
+│   └── Agent_001/
+│       └── recording_001.WAV
+└── 2025_11_21/
+    └── PERU_003/
+        └── R20251121-090015.WAV
+```
+
+**Поддерживаемые S3-провайдеры:**
+- ☁️ Yandex Object Storage (рекомендуется)
+- ☁️ AWS S3
+- ☁️ Selectel Object Storage
+- ☁️ VK Cloud Solutions
+- 🏠 MinIO (self-hosted)
 
 ### 3. Запуск
 
@@ -146,16 +220,23 @@ python main.py process /path/to/audio.mp3
 python main.py monitor [OPTIONS]
 
 Options:
-  --check-interval INT    Интервал проверки устройств в секундах (по умолчанию: 5)
-  --api-key TEXT         OpenAI API ключ (или из .env)
-  --language TEXT        Язык аудио: es, en, ru и т.д. (по умолчанию: es)
-  --chunk-length INT     Длина чанка в минутах (по умолчанию: 10)
-  --overlap INT          Overlap между чанками в секундах (по умолчанию: 5)
+  --check-interval INT       Интервал проверки устройств в секундах (по умолчанию: 5)
+  --api-key TEXT            Yandex OAuth токен (SOY_TOKEN)
+  --assemblyai-api-key TEXT AssemblyAI API ключ
+  --use-assemblyai BOOL     Использовать AssemblyAI с diarization (по умолчанию: false)
+  --num-speakers INT        Количество говорящих для diarization (по умолчанию: 2)
+  --language TEXT           Язык аудио: ru, es, en и т.д. (по умолчанию: ru)
+  --chunk-length INT        Длина чанка в минутах (по умолчанию: 10)
+  --overlap INT             Overlap между чанками в секундах (по умолчанию: 10)
 ```
 
-**Пример:**
+**Примеры:**
 ```bash
-python main.py monitor --check-interval 10 --language es
+# Базовая транскрипция через Yandex Eliza
+python main.py monitor --language ru
+
+# С разделением по говорящим через AssemblyAI
+python main.py monitor --use-assemblyai true --num-speakers 2
 ```
 
 ### Process - Обработка файла или устройства
@@ -164,19 +245,25 @@ python main.py monitor --check-interval 10 --language es
 python main.py process PATH [OPTIONS]
 
 Arguments:
-  PATH                   Путь к устройству или аудиофайлу
+  PATH                      Путь к устройству или аудиофайлу
 
 Options:
-  --api-key TEXT         OpenAI API ключ
-  --language TEXT        Язык аудио (по умолчанию: es)
-  --chunk-length INT     Длина чанка в минутах
-  --overlap INT          Overlap в секундах
+  --api-key TEXT            Yandex OAuth токен (SOY_TOKEN)
+  --assemblyai-api-key TEXT AssemblyAI API ключ
+  --use-assemblyai BOOL     Использовать AssemblyAI с diarization
+  --num-speakers INT        Количество говорящих
+  --language TEXT           Язык аудио (по умолчанию: ru)
+  --chunk-length INT        Длина чанка в минутах
+  --overlap INT             Overlap в секундах
 ```
 
 **Примеры:**
 ```bash
 # Обработка устройства
 python main.py process /media/usb0
+
+# Обработка файла с diarization
+python main.py process /path/to/audio.mp3 --use-assemblyai true
 
 # Обработка файла
 python main.py process /home/user/recording.mp3 --language es
@@ -225,25 +312,68 @@ python main.py search --date-from 2024-01-01 --date-to 2024-01-31
 python main.py search "taxi" --device USB_Device_1 --limit 50
 ```
 
+## Speaker Diarization - Разделение по говорящим
+
+Система поддерживает два режима работы:
+
+### 1. Базовая транскрипция (Yandex Eliza)
+- Быстрая транскрипция без разделения по говорящим
+- Использует Yandex Eliza API (Whisper-совместимый)
+- Бесплатный или низкая стоимость
+
+### 2. С разделением по говорящим (AssemblyAI)
+- Автоматически определяет разных говорящих
+- Форматирует текст как диалог: "Собеседник A: ...", "Собеседник B: ..."
+- Показывает статистику по каждому говорящему
+- Стоимость: ~$0.90 за час аудио
+
+**Пример вывода с diarization:**
+```
+Собеседник A: Здравствуйте, это служба поддержки. Чем могу помочь?
+
+Собеседник B: Здравствуйте! У меня проблема с заказом номер 12345.
+
+Собеседник A: Сейчас проверю. Один момент, пожалуйста.
+
+Собеседник B: Хорошо, спасибо.
+```
+
+**Включение diarization:**
+
+В `.env`:
+```env
+USE_ASSEMBLYAI=true
+ASSEMBLYAI_API_KEY=your-api-key-here
+DEFAULT_NUM_SPEAKERS=2
+```
+
+Или через CLI:
+```bash
+python main.py monitor --use-assemblyai true --num-speakers 2
+```
+
 ## Структура проекта
 
 ```
 neuro-caller/
 ├── src/
 │   ├── __init__.py
-│   ├── usb_monitor.py          # Мониторинг USB устройств
-│   ├── file_manager.py         # Управление файлами
-│   ├── audio_processor.py      # Обработка аудио
-│   ├── transcriber.py          # Транскрибация через Whisper
-│   └── database.py             # База данных SQLite
+│   ├── usb_monitor.py             # Мониторинг USB устройств
+│   ├── file_manager.py            # Управление файлами
+│   ├── audio_processor.py         # Обработка аудио
+│   ├── transcriber.py             # Транскрибация через Yandex Eliza
+│   ├── assemblyai_transcriber.py  # Speaker diarization через AssemblyAI
+│   ├── telegram_notifier.py       # Telegram уведомления
+│   └── database.py                # База данных SQLite
 ├── data/
-│   ├── audio/                  # Скопированные аудиофайлы
-│   ├── transcriptions/         # JSON транскрипции
-│   ├── transcriptions.db       # База данных
-│   └── processed_files.json    # Реестр обработанных файлов
+│   ├── audio/                     # Скопированные аудиофайлы
+│   ├── transcriptions/            # Текстовые транскрипции
+│   ├── transcriptions.db          # База данных
+│   └── processed_files.json       # Реестр обработанных файлов
+├── output/                        # Текстовые файлы транскрипций
 ├── logs/
-│   └── transcription.log       # Логи
-├── main.py                     # Главный CLI
+│   └── transcription.log          # Логи
+├── main.py                        # Главный CLI
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore

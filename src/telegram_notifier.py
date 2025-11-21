@@ -9,6 +9,7 @@ from datetime import datetime
 import asyncio
 from aiogram import Bot
 from aiogram.enums import ParseMode
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +39,19 @@ class TelegramNotifier:
         else:
             logger.info("ℹ️  Telegram уведомления отключены")
 
-    async def _send_message(self, text: str, parse_mode: str = ParseMode.HTML):
+    async def _send_message(
+        self,
+        text: str,
+        parse_mode: str = ParseMode.HTML,
+        reply_markup: InlineKeyboardMarkup = None
+    ):
         """
         Отправка сообщения в Telegram
 
         Args:
             text: Текст сообщения
             parse_mode: Режим парсинга (HTML, Markdown)
+            reply_markup: Inline клавиатура с кнопками
         """
         if not self.enabled:
             return
@@ -54,19 +61,26 @@ class TelegramNotifier:
                 chat_id=self.chat_id,
                 text=text,
                 parse_mode=parse_mode,
+                reply_markup=reply_markup,
                 disable_notification=False
             )
             logger.debug(f"Telegram сообщение отправлено: {text[:50]}...")
         except Exception as e:
             logger.error(f"Ошибка отправки Telegram сообщения: {e}")
 
-    def send_message_sync(self, text: str, parse_mode: str = ParseMode.HTML):
+    def send_message_sync(
+        self,
+        text: str,
+        parse_mode: str = ParseMode.HTML,
+        reply_markup: InlineKeyboardMarkup = None
+    ):
         """
         Синхронная отправка сообщения (для использования в обычном коде)
 
         Args:
             text: Текст сообщения
             parse_mode: Режим парсинга
+            reply_markup: Inline клавиатура с кнопками
         """
         if not self.enabled:
             return
@@ -80,7 +94,7 @@ class TelegramNotifier:
                 asyncio.set_event_loop(loop)
 
             # Запускаем асинхронную функцию
-            loop.run_until_complete(self._send_message(text, parse_mode))
+            loop.run_until_complete(self._send_message(text, parse_mode, reply_markup))
         except Exception as e:
             logger.error(f"Ошибка синхронной отправки сообщения: {e}")
 
@@ -165,6 +179,67 @@ class TelegramNotifier:
 
         self.send_message_sync(text)
 
+    def notify_s3_upload(
+        self,
+        filename: str,
+        s3_key: str,
+        size_mb: float,
+        presigned_url: str = None,
+        expiry_days: int = 7
+    ):
+        """
+        Уведомление о загрузке файла в S3 Object Storage
+
+        Args:
+            filename: Имя файла
+            s3_key: Ключ файла в S3 (путь в бакете)
+            size_mb: Размер файла в MB
+            presigned_url: Временная ссылка для скачивания (опционально)
+            expiry_days: Срок действия ссылки в днях (по умолчанию 7)
+        """
+        text = (
+            f"☁️ <b>Файл загружен в S3</b>\n\n"
+            f"📝 Файл: <code>{filename}</code>\n"
+            f"💾 Размер: <b>{size_mb:.1f} MB</b>\n"
+            f"📍 Путь: <code>{s3_key}</code>\n"
+        )
+
+        # Добавляем информацию о сроке действия ссылки
+        if presigned_url:
+            text += f"\n🔗 Ссылка действительна <b>{expiry_days} дней</b>"
+
+        text += f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+
+        # Создаем inline кнопку для скачивания если есть URL
+        reply_markup = None
+        if presigned_url:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬇️ Скачать из S3", url=presigned_url)]
+                ]
+            )
+            reply_markup = keyboard
+
+        self.send_message_sync(text, reply_markup=reply_markup)
+
+    def notify_s3_upload_error(self, filename: str, error_message: str):
+        """
+        Уведомление об ошибке загрузки в S3
+
+        Args:
+            filename: Имя файла
+            error_message: Текст ошибки
+        """
+        text = (
+            f"⚠️ <b>Ошибка загрузки в S3</b>\n\n"
+            f"📝 Файл: <code>{filename}</code>\n"
+            f"❌ Ошибка: {error_message}\n"
+            f"\n💡 Файл сохранен локально\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+        )
+
+        self.send_message_sync(text)
+
     def notify_processing_started(self, files_count: int):
         """
         Уведомление о начале обработки файлов
@@ -175,7 +250,7 @@ class TelegramNotifier:
         text = (
             f"🔄 <b>Начинаю обработку</b>\n\n"
             f"📊 Файлов к обработке: <b>{files_count}</b>\n"
-            f"⚙️ Нарезка на части + транскрибация\n"
+            f"⚙️ Транскрибация с определением говорящих\n"
             f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
 
@@ -208,29 +283,15 @@ class TelegramNotifier:
 
         self.send_message_sync(text)
 
-    def notify_file_needs_chunking(self, filename: str, chunks_count: int):
-        """
-        Уведомление о разделении файла на части
-
-        Args:
-            filename: Имя файла
-            chunks_count: Количество частей
-        """
-        text = (
-            f"✂️ <b>Разделение на части</b>\n\n"
-            f"📝 {filename}\n"
-            f"🧩 Частей: <b>{chunks_count}</b>"
-        )
-
-        self.send_message_sync(text)
-
     def notify_transcription_complete(
         self,
         file_num: int,
         total_files: int,
         filename: str,
         word_count: int,
-        char_count: int
+        char_count: int,
+        speaker_stats: dict = None,
+        transcription_preview: str = None
     ):
         """
         Уведомление об окончании транскрибации файла
@@ -241,6 +302,8 @@ class TelegramNotifier:
             filename: Имя файла
             word_count: Количество слов
             char_count: Количество символов
+            speaker_stats: Статистика по говорящим (опционально)
+            transcription_preview: Первые 500 символов транскрипции (опционально)
         """
         text = (
             f"✅ <b>[{file_num}/{total_files}]</b> Готово!\n\n"
@@ -248,6 +311,24 @@ class TelegramNotifier:
             f"📊 Слов: <b>{word_count}</b>\n"
             f"📄 Символов: <b>{char_count}</b>"
         )
+
+        # Добавляем статистику по говорящим если есть
+        if speaker_stats:
+            text += f"\n\n👥 Говорящих: <b>{len(speaker_stats)}</b>"
+            for speaker, stats in speaker_stats.items():
+                text += (
+                    f"\n  • Собеседник {speaker}: "
+                    f"{stats['utterances']} реплик, "
+                    f"{stats['total_time']:.1f}с"
+                )
+
+        # Добавляем превью транскрипции (первые 500 символов)
+        if transcription_preview:
+            preview = transcription_preview[:500]
+            # Если текст обрезан, добавляем многоточие
+            if len(transcription_preview) > 500:
+                preview += "..."
+            text += f"\n\n📄 <b>Текст:</b>\n<i>{preview}</i>"
 
         self.send_message_sync(text)
 
