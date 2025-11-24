@@ -24,6 +24,7 @@ from src.assemblyai_transcriber import AssemblyAITranscriber
 from src.database import TranscriptionDatabase
 from src.telegram_notifier import TelegramNotifier
 from src.s3_uploader import S3Uploader
+from src.tracker_client import TrackerClient
 
 
 # Настройка логирования
@@ -65,7 +66,12 @@ class TranscriptionPipeline:
         s3_storage_class: str = "STANDARD",
         s3_retry_attempts: int = 3,
         s3_timeout: int = 300,
-        s3_presigned_url_expiry: int = 604800
+        s3_presigned_url_expiry: int = 604800,
+        tracker_enabled: bool = False,
+        tracker_oauth_token: str = None,
+        tracker_queue: str = "YANGOSCOUTS",
+        transcribe_conversation: bool = True,
+        max_parallel_copies: int = 3
     ):
         """
         Args:
@@ -85,6 +91,11 @@ class TranscriptionPipeline:
             s3_retry_attempts: Количество повторных попыток
             s3_timeout: Таймаут загрузки в секундах
             s3_presigned_url_expiry: Время жизни presigned URL в секундах
+            tracker_enabled: Включено ли создание задач в трекере
+            tracker_oauth_token: OAuth токен для Яндекс Трекера
+            tracker_queue: Очередь для создания задач
+            transcribe_conversation: Выполнять транскрибацию разговоров (если False, процесс остановится после создания задач)
+            max_parallel_copies: Количество параллельных потоков для копирования файлов
         """
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -92,21 +103,26 @@ class TranscriptionPipeline:
         self.logger.info("Инициализация компонентов пайплайна...")
 
         self.num_speakers = num_speakers
+        self.transcribe_conversation = transcribe_conversation
 
         # S3 параметры
         self.s3_enabled = s3_enabled
         self.s3_storage_class = s3_storage_class
         self.s3_presigned_url_expiry = s3_presigned_url_expiry
 
-        self.file_manager = FileManager()
+        self.file_manager = FileManager(max_workers=max_parallel_copies)
         self.audio_processor = AudioProcessor()
 
-        # Транскрайбер AssemblyAI
-        self.transcriber = AssemblyAITranscriber(
-            api_key=assemblyai_api_key,
-            language=language
-        )
-        self.logger.info("Используется AssemblyAI (с diarization)")
+        # Транскрайбер AssemblyAI (опциональный)
+        if transcribe_conversation:
+            self.transcriber = AssemblyAITranscriber(
+                api_key=assemblyai_api_key,
+                language=language
+            )
+            self.logger.info("Используется AssemblyAI (с diarization)")
+        else:
+            self.transcriber = None
+            self.logger.info("Транскрибация отключена (TRANSCRIBE_CONVERSATION=false)")
 
         self.database = TranscriptionDatabase()
 
@@ -142,6 +158,15 @@ class TranscriptionPipeline:
         elif s3_enabled:
             self.logger.warning("⚠️ S3 включен, но не все параметры заданы. S3 будет отключен.")
             self.s3_enabled = False
+
+        # Яндекс Трекер
+        self.tracker = TrackerClient(
+            oauth_token=tracker_oauth_token,
+            queue=tracker_queue,
+            enabled=tracker_enabled
+        )
+        if tracker_enabled and self.tracker.enabled:
+            self.logger.info(f"✅ Яндекс Трекер инициализирован (очередь: {tracker_queue})")
 
         self.logger.info("✅ Пайплайн готов к работе")
 
@@ -323,43 +348,74 @@ ID: {transcription_id}
         # Telegram: уведомление об окончании копирования
         self.telegram.notify_copying_complete(
             files_count=len(copied_files),
-            total_size_mb=total_size_mb
+            total_size_mb=total_size_mb,
+            device_name=device_name
         )
 
         # ============================================================
-        # S3: УВЕДОМЛЕНИЯ О ЗАГРУЗКЕ В ОБЛАКО
+        # ЯНДЕКС ТРЕКЕР: СОЗДАНИЕ ЗАДАЧ ДЛЯ ФАЙЛОВ В S3
         # ============================================================
-        if self.s3_enabled and self.s3_uploader:
-            self.logger.info("\n☁️  Отправка уведомлений о загрузке в S3...")
+        if self.s3_enabled and self.s3_uploader and self.tracker.enabled:
+            self.logger.info("\n📋 Создание задач в Яндекс Трекере...")
 
             for file_info in copied_files:
                 # Проверяем что файл загружен в S3
                 if file_info.get('s3_uploaded') and file_info.get('s3_key'):
                     s3_key = file_info['s3_key']
                     filename = Path(file_info['local_path']).name
-                    size_mb = file_info.get('size_bytes', 0) / (1024 * 1024)
+                    already_exists = file_info.get('s3_already_exists', False)
 
-                    # Генерируем presigned URL для скачивания
+                    # Пропускаем файлы, которые уже были в S3
+                    if already_exists:
+                        self.logger.info(f"   ⏩ Файл уже был в S3, пропускаем создание задачи: {filename}")
+                        continue
+
+                    # Генерируем presigned URL для описания задачи
                     presigned_url = self.s3_uploader.generate_presigned_url(
                         s3_key=s3_key,
                         expiration=self.s3_presigned_url_expiry
                     )
 
-                    # Отправляем Telegram уведомление
                     if presigned_url:
-                        expiry_days = self.s3_presigned_url_expiry // 86400  # секунды в дни
-                        self.telegram.notify_s3_upload(
-                            filename=filename,
-                            s3_key=s3_key,
-                            size_mb=size_mb,
-                            presigned_url=presigned_url,
-                            expiry_days=expiry_days
+                        # Создание задачи в Яндекс Трекере
+                        summary = TrackerClient.build_summary_from_s3_key(s3_key)
+                        issue = self.tracker.create_issue(
+                            summary=summary,
+                            description=presigned_url,
+                            transcribe_conversation=self.transcribe_conversation
                         )
-                        self.logger.info(f"   ✓ Уведомление отправлено: {filename}")
-                    else:
-                        self.logger.warning(f"   ⚠ Не удалось создать ссылку для {filename}")
+                        if issue:
+                            issue_key = issue.get('key')
+                            issue_url = issue.get('self')  # URL задачи в API
+                            self.logger.info(f"   ✓ Задача создана: {issue_key} для {filename}")
 
-            self.logger.info("✅ Уведомления о S3 отправлены")
+                            # Отправляем Telegram уведомление о созданной задаче
+                            self.telegram.notify_tracker_issue_created(
+                                issue_key=issue_key,
+                                s3_key=s3_key,
+                                issue_url=issue_url
+                            )
+                    else:
+                        self.logger.warning(f"   ⚠ Не удалось создать ссылку для задачи: {filename}")
+
+            self.logger.info("✅ Задачи в Трекере созданы")
+
+        # ============================================================
+        # ПРОВЕРКА: НУЖНА ЛИ ТРАНСКРИБАЦИЯ
+        # ============================================================
+        if not self.transcribe_conversation:
+            self.logger.info("\n⏹️  Транскрибация отключена (TRANSCRIBE_CONVERSATION=false)")
+            self.logger.info("   Процесс завершен после создания задач в трекере")
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"✅ ВСЁ ГОТОВО! Обработано файлов: {len(copied_files)}")
+            self.logger.info(f"{'='*60}")
+
+            # Telegram: уведомление об окончании
+            self.telegram.notify_all_complete(
+                files_count=len(copied_files),
+                device_name=device_name
+            )
+            return
 
         # ============================================================
         # ЭТАП 2: ОБРАБОТКА СКОПИРОВАННЫХ ФАЙЛОВ
@@ -422,6 +478,12 @@ ID: {transcription_id}
                 duration_min=audio_info['duration_minutes'],
                 size_mb=audio_info['file_size_mb']
             )
+
+            # ПРОВЕРКА: НУЖНА ЛИ ТРАНСКРИБАЦИЯ
+            if not self.transcribe_conversation:
+                self.logger.info("⏹️  Транскрибация отключена (TRANSCRIBE_CONVERSATION=false)")
+                self.logger.info("   Файл скопирован, транскрибация пропущена")
+                return
 
             # Транскрибация через AssemblyAI
             self.logger.info("🎤 Отправка в AssemblyAI для транскрибации с diarization...")
@@ -522,7 +584,12 @@ def monitor_mode(args):
         s3_storage_class=args.s3_storage_class,
         s3_retry_attempts=args.s3_retry_attempts,
         s3_timeout=args.s3_timeout,
-        s3_presigned_url_expiry=args.s3_presigned_url_expiry
+        s3_presigned_url_expiry=args.s3_presigned_url_expiry,
+        tracker_enabled=args.tracker_enabled,
+        tracker_oauth_token=args.tracker_token,
+        tracker_queue=args.tracker_queue,
+        transcribe_conversation=args.transcribe_conversation,
+        max_parallel_copies=args.max_parallel_copies
     )
 
     usb_monitor = USBMonitor(check_interval=args.check_interval)
@@ -576,7 +643,12 @@ def process_mode(args):
         s3_storage_class=args.s3_storage_class,
         s3_retry_attempts=args.s3_retry_attempts,
         s3_timeout=args.s3_timeout,
-        s3_presigned_url_expiry=args.s3_presigned_url_expiry
+        s3_presigned_url_expiry=args.s3_presigned_url_expiry,
+        tracker_enabled=args.tracker_enabled,
+        tracker_oauth_token=args.tracker_token,
+        tracker_queue=args.tracker_queue,
+        transcribe_conversation=args.transcribe_conversation,
+        max_parallel_copies=args.max_parallel_copies
     )
 
     path = Path(args.path)
@@ -712,6 +784,11 @@ def main():
     monitor_parser.add_argument("--s3-retry-attempts", type=int, default=int(os.getenv("S3_RETRY_ATTEMPTS", "3")), help="S3 retry attempts")
     monitor_parser.add_argument("--s3-timeout", type=int, default=int(os.getenv("S3_UPLOAD_TIMEOUT", "300")), help="S3 upload timeout (секунды)")
     monitor_parser.add_argument("--s3-presigned-url-expiry", type=int, default=int(os.getenv("S3_PRESIGNED_URL_EXPIRY", "604800")), help="Время жизни presigned URL (секунды)")
+    monitor_parser.add_argument("--tracker-enabled", type=lambda x: x.lower() == 'true', default=os.getenv("TRACKER_ENABLED", "false").lower() == "true", help="Включить создание задач в трекере")
+    monitor_parser.add_argument("--tracker-token", default=os.getenv("TRACKER_OAUTH_TOKEN"), help="OAuth токен для Яндекс Трекера")
+    monitor_parser.add_argument("--tracker-queue", default=os.getenv("TRACKER_QUEUE", "YANGOSCOUTS"), help="Очередь для создания задач")
+    monitor_parser.add_argument("--transcribe-conversation", type=lambda x: x.lower() == 'true', default=os.getenv("TRANSCRIBE_CONVERSATION", "true").lower() == "true", help="Выполнять транскрибацию разговоров")
+    monitor_parser.add_argument("--max-parallel-copies", type=int, default=int(os.getenv("MAX_PARALLEL_COPIES", "3")), help="Количество параллельных потоков для копирования файлов")
 
     # Команда: process
     process_parser = subparsers.add_parser("process", help="Обработать устройство или файл")
@@ -733,6 +810,11 @@ def main():
     process_parser.add_argument("--s3-retry-attempts", type=int, default=int(os.getenv("S3_RETRY_ATTEMPTS", "3")), help="S3 retry attempts")
     process_parser.add_argument("--s3-timeout", type=int, default=int(os.getenv("S3_UPLOAD_TIMEOUT", "300")), help="S3 upload timeout (секунды)")
     process_parser.add_argument("--s3-presigned-url-expiry", type=int, default=int(os.getenv("S3_PRESIGNED_URL_EXPIRY", "604800")), help="Время жизни presigned URL (секунды)")
+    process_parser.add_argument("--tracker-enabled", type=lambda x: x.lower() == 'true', default=os.getenv("TRACKER_ENABLED", "false").lower() == "true", help="Включить создание задач в трекере")
+    process_parser.add_argument("--tracker-token", default=os.getenv("TRACKER_OAUTH_TOKEN"), help="OAuth токен для Яндекс Трекера")
+    process_parser.add_argument("--tracker-queue", default=os.getenv("TRACKER_QUEUE", "YANGOSCOUTS"), help="Очередь для создания задач")
+    process_parser.add_argument("--transcribe-conversation", type=lambda x: x.lower() == 'true', default=os.getenv("TRANSCRIBE_CONVERSATION", "true").lower() == "true", help="Выполнять транскрибацию разговоров")
+    process_parser.add_argument("--max-parallel-copies", type=int, default=int(os.getenv("MAX_PARALLEL_COPIES", "3")), help="Количество параллельных потоков для копирования файлов")
 
     # Команда: stats
     stats_parser = subparsers.add_parser("stats", help="Показать статистику")

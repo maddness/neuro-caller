@@ -5,7 +5,6 @@ Telegram уведомления о процессе обработки
 
 import logging
 from typing import Optional
-from datetime import datetime
 import asyncio
 from aiogram import Bot
 from aiogram.enums import ParseMode
@@ -27,15 +26,9 @@ class TelegramNotifier:
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.enabled = enabled and bot_token and chat_id
-        self.bot = None
 
         if self.enabled:
-            try:
-                self.bot = Bot(token=self.bot_token)
-                logger.info("✅ Telegram бот инициализирован")
-            except Exception as e:
-                logger.error(f"❌ Ошибка инициализации Telegram бота: {e}")
-                self.enabled = False
+            logger.info("✅ Telegram бот инициализирован")
         else:
             logger.info("ℹ️  Telegram уведомления отключены")
 
@@ -56,8 +49,11 @@ class TelegramNotifier:
         if not self.enabled:
             return
 
+        bot = None
         try:
-            await self.bot.send_message(
+            # Создаем бота для каждой отправки (чтобы избежать проблем с закрытым event loop)
+            bot = Bot(token=self.bot_token)
+            await bot.send_message(
                 chat_id=self.chat_id,
                 text=text,
                 parse_mode=parse_mode,
@@ -67,6 +63,10 @@ class TelegramNotifier:
             logger.debug(f"Telegram сообщение отправлено: {text[:50]}...")
         except Exception as e:
             logger.error(f"Ошибка отправки Telegram сообщения: {e}")
+        finally:
+            # Закрываем сессию бота
+            if bot:
+                await bot.session.close()
 
     def send_message_sync(
         self,
@@ -86,15 +86,9 @@ class TelegramNotifier:
             return
 
         try:
-            # Создаем новый event loop если его нет
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            # Запускаем асинхронную функцию
-            loop.run_until_complete(self._send_message(text, parse_mode, reply_markup))
+            # asyncio.run() создает новый event loop для каждого вызова
+            # Это работает в потоках ThreadPoolExecutor
+            asyncio.run(self._send_message(text, parse_mode, reply_markup))
         except Exception as e:
             logger.error(f"Ошибка синхронной отправки сообщения: {e}")
 
@@ -122,8 +116,6 @@ class TelegramNotifier:
         if label:
             text += f"🏷 Метка: <b>{label}</b>\n"
 
-        text += f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
-
         self.send_message_sync(text)
 
     def notify_copying_started(self, files_count: int, total_size_mb: float):
@@ -137,13 +129,12 @@ class TelegramNotifier:
         text = (
             f"📦 <b>Начинаю копирование</b>\n\n"
             f"📁 Файлов: <b>{files_count}</b>\n"
-            f"💾 Размер: <b>{total_size_mb:.1f} MB</b>\n"
-            f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+            f"💾 Размер: <b>{total_size_mb:.1f} MB</b>"
         )
 
         self.send_message_sync(text)
 
-    def notify_file_copied(self, file_num: int, total_files: int, filename: str, size_mb: float):
+    def notify_file_copied(self, file_num: int, total_files: int, filename: str, size_mb: float, device_path: str = None):
         """
         Уведомление о копировании файла
 
@@ -152,30 +143,38 @@ class TelegramNotifier:
             total_files: Всего файлов
             filename: Имя файла
             size_mb: Размер в MB
+            device_path: Полный путь к файлу на устройстве (опционально)
         """
-        text = (
-            f"📄 <b>[{file_num}/{total_files}]</b> Копирую...\n\n"
-            f"📝 {filename}\n"
-            f"💾 {size_mb:.1f} MB"
-        )
+        text = f"📄 <b>[{file_num}/{total_files}]</b> Копирую...\n\n"
+
+        if device_path:
+            text += f"📍 <code>{device_path}</code>\n"
+        else:
+            text += f"📝 {filename}\n"
+
+        text += f"💾 {size_mb:.1f} MB"
 
         self.send_message_sync(text)
 
-    def notify_copying_complete(self, files_count: int, total_size_mb: float):
+    def notify_copying_complete(self, files_count: int, total_size_mb: float, device_name: str = None):
         """
         Уведомление об окончании копирования
 
         Args:
             files_count: Количество скопированных файлов
             total_size_mb: Общий размер
+            device_name: Имя устройства (опционально)
         """
         text = (
             f"✅ <b>ВСЕ ФАЙЛЫ СКОПИРОВАНЫ!</b>\n\n"
             f"📁 Скопировано: <b>{files_count}</b> файлов\n"
-            f"💾 Размер: <b>{total_size_mb:.1f} MB</b>\n\n"
-            f"🔓 <b>Можно отключить диктофон</b>\n"
-            f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+            f"💾 Размер: <b>{total_size_mb:.1f} MB</b>\n"
         )
+
+        if device_name:
+            text += f"🆔 Устройство: <code>{device_name}</code>\n"
+
+        text += f"\n🔓 <b>Можно отключить диктофон</b>"
 
         self.send_message_sync(text)
 
@@ -199,16 +198,13 @@ class TelegramNotifier:
         """
         text = (
             f"☁️ <b>Файл загружен в S3</b>\n\n"
-            f"📝 Файл: <code>{filename}</code>\n"
-            f"💾 Размер: <b>{size_mb:.1f} MB</b>\n"
-            f"📍 Путь: <code>{s3_key}</code>\n"
+            f"📍 <code>{s3_key}</code>\n"
+            f"💾 Размер: <b>{size_mb:.1f} MB</b>"
         )
 
         # Добавляем информацию о сроке действия ссылки
         if presigned_url:
-            text += f"\n🔗 Ссылка действительна <b>{expiry_days} дней</b>"
-
-        text += f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+            text += f"\n\n🔗 Ссылка действительна <b>{expiry_days} дней</b>"
 
         # Создаем inline кнопку для скачивания если есть URL
         reply_markup = None
@@ -222,6 +218,22 @@ class TelegramNotifier:
 
         self.send_message_sync(text, reply_markup=reply_markup)
 
+    def notify_s3_already_exists(self, s3_key: str, size_mb: float):
+        """
+        Уведомление о том, что файл уже существует в S3
+
+        Args:
+            s3_key: Ключ файла в S3 (полный путь)
+            size_mb: Размер файла в MB
+        """
+        text = (
+            f"⏩ <b>Файл уже существует в S3</b>\n\n"
+            f"📍 <code>{s3_key}</code>\n"
+            f"💾 Размер: <b>{size_mb:.1f} MB</b>"
+        )
+
+        self.send_message_sync(text)
+
     def notify_s3_upload_error(self, filename: str, error_message: str):
         """
         Уведомление об ошибке загрузки в S3
@@ -234,8 +246,32 @@ class TelegramNotifier:
             f"⚠️ <b>Ошибка загрузки в S3</b>\n\n"
             f"📝 Файл: <code>{filename}</code>\n"
             f"❌ Ошибка: {error_message}\n"
-            f"\n💡 Файл сохранен локально\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+            f"\n💡 Файл сохранен локально"
+        )
+
+        self.send_message_sync(text)
+
+    def notify_tracker_issue_created(self, issue_key: str, s3_key: str, issue_url: str = None):
+        """
+        Уведомление о создании задачи в Яндекс Трекере
+
+        Args:
+            issue_key: Ключ задачи (например, PROJ-123)
+            s3_key: Ключ файла в S3 (полный путь)
+            issue_url: URL задачи в Трекере (опционально)
+        """
+        # Формируем ссылку на задачу (если URL API, преобразуем в веб-ссылку)
+        if issue_url:
+            # Преобразуем API URL в веб URL
+            # https://st-api.yandex-team.ru/v2/issues/MICBUDDY-56 -> https://st.yandex-team.ru/MICBUDDY-56
+            web_url = f"https://st.yandex-team.ru/{issue_key}"
+            task_link = f"<a href=\"{web_url}\">{issue_key}</a>"
+        else:
+            task_link = f"<code>{issue_key}</code>"
+
+        text = (
+            f"📋 Задача {task_link} создана\n\n"
+            f"📝 Файл: <code>{s3_key}</code>"
         )
 
         self.send_message_sync(text)
@@ -250,8 +286,7 @@ class TelegramNotifier:
         text = (
             f"🔄 <b>Начинаю обработку</b>\n\n"
             f"📊 Файлов к обработке: <b>{files_count}</b>\n"
-            f"⚙️ Транскрибация с определением говорящих\n"
-            f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+            f"⚙️ Транскрибация с определением говорящих"
         )
 
         self.send_message_sync(text)
@@ -355,9 +390,7 @@ class TelegramNotifier:
             text += f"⏱ Общая длительность: <b>{total_duration_min:.1f} мин</b>\n"
 
         if device_name:
-            text += f"🆔 Устройство: <code>{device_name}</code>\n"
-
-        text += f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+            text += f"🆔 Устройство: <code>{device_name}</code>"
 
         self.send_message_sync(text)
 
@@ -374,15 +407,13 @@ class TelegramNotifier:
         if filename:
             text += f"📝 Файл: {filename}\n"
 
-        text += f"⚠️ {error_message}\n"
-        text += f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+        text += f"⚠️ {error_message}"
 
         self.send_message_sync(text)
 
     async def close(self):
-        """Закрытие соединения с Telegram"""
-        if self.bot:
-            await self.bot.close()
+        """Закрытие соединения с Telegram (не требуется, т.к. бот создается для каждой отправки)"""
+        pass
 
 
 if __name__ == "__main__":

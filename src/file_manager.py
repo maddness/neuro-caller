@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import List, Set, Dict, Optional, Tuple
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -20,18 +21,28 @@ class FileManager:
     # Поддерживаемые аудио форматы
     AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.wma', '.opus'}
 
-    def __init__(self, local_storage_path: str = "data/audio", db_path: str = "data/processed_files.json"):
+    def __init__(
+        self,
+        local_storage_path: str = "data/audio",
+        db_path: str = "data/processed_files.json",
+        max_workers: int = 3
+    ):
         """
         Args:
             local_storage_path: Путь для хранения скопированных файлов
             db_path: Путь к файлу БД обработанных файлов
+            max_workers: Количество параллельных потоков для копирования файлов
         """
         self.local_storage_path = Path(local_storage_path)
         self.db_path = Path(db_path)
+        self.max_workers = max_workers
 
         # Создаем директории если не существуют
         self.local_storage_path.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Логируем настройки параллелизма
+        logger.info(f"📦 Параллельное копирование: {max_workers} потоков")
 
         # Загружаем БД обработанных файлов
         self.processed_files = self._load_processed_files()
@@ -85,28 +96,41 @@ class FileManager:
 
     def find_audio_files(self, device_path: str) -> List[Path]:
         """
-        Поиск всех аудиофайлов на устройстве
+        Поиск WAV файлов в папке RECORD на устройстве
 
         Args:
             device_path: Путь к устройству
 
         Returns:
-            Список путей к аудиофайлам
+            Список путей к WAV файлам из RECORD
         """
         audio_files = []
 
         try:
-            for root, dirs, files in os.walk(device_path):
-                for file in files:
-                    # Пропускаем macOS служебные файлы
-                    if file.startswith('._') or file.startswith('.'):
-                        continue
+            # Проверяем наличие папки RECORD в корне устройства
+            records_path = Path(device_path) / 'RECORD'
 
-                    file_path = Path(root) / file
-                    if file_path.suffix.lower() in self.AUDIO_EXTENSIONS:
-                        audio_files.append(file_path)
+            if not records_path.exists():
+                logger.info(f"Папка RECORD не найдена на {device_path}")
+                return audio_files
 
-            logger.info(f"Найдено {len(audio_files)} аудиофайлов на {device_path}")
+            if not records_path.is_dir():
+                logger.warning(f"RECORD существует, но это не папка на {device_path}")
+                return audio_files
+
+            # Читаем только файлы из RECORD (без рекурсии)
+            for file in os.listdir(records_path):
+                # Пропускаем macOS служебные файлы и скрытые
+                if file.startswith('._') or file.startswith('.'):
+                    continue
+
+                file_path = records_path / file
+
+                # Проверяем что это файл (не директория) и расширение .wav
+                if file_path.is_file() and file_path.suffix.lower() == '.wav':
+                    audio_files.append(file_path)
+
+            logger.info(f"Найдено {len(audio_files)} WAV файлов в RECORD на {device_path}")
 
         except Exception as e:
             logger.error(f"Ошибка поиска файлов на {device_path}: {e}")
@@ -208,34 +232,43 @@ class FileManager:
 
             # ЭТАП 2: Загружаем в S3 (если включено)
             if self.s3_uploader:
-                # Формируем S3 ключ: YYYY_MM_DD/device_name/filename
-                # ВАЖНО: Дата с подчеркиваниями, не дефисами!
+                # Формируем S3 ключ: YYYY_MM_DD/device_name/original_filename
+                # ВАЖНО: Используем оригинальное имя файла БЕЗ суффиксов (_1, _2 и т.д.)
+                # Дата с подчеркиваниями, не дефисами!
                 date_underscored = datetime.now().strftime("%Y_%m_%d")
-                s3_key = f"{date_underscored}/{device_folder}/{destination_path.name}"
+                s3_key = f"{date_underscored}/{device_folder}/{source_path.name}"
 
-                # Метаданные для файла в S3
-                metadata = {
-                    'device': device_folder,
-                    'original_filename': source_path.name,
-                    'upload_date': datetime.now().isoformat()
-                }
-
-                logger.info(f"Загрузка в S3: {s3_key}")
-
-                # Загружаем файл в S3
-                s3_success = self.s3_uploader.upload_file(
-                    file_path=destination_path,
-                    s3_key=s3_key,
-                    storage_class=storage_class,
-                    metadata=metadata
-                )
-
-                if s3_success:
+                # Проверяем существование файла в S3 по оригинальному имени
+                if self.s3_uploader.file_exists(s3_key):
+                    logger.info(f"⏩ Файл уже существует в S3, пропускаем: {s3_key}")
                     result['s3_key'] = s3_key
                     result['s3_uploaded'] = True
-                    logger.info(f"✓ Файл загружен в S3: {s3_key}")
+                    result['s3_already_exists'] = True
                 else:
-                    logger.warning(f"⚠ Не удалось загрузить файл в S3: {s3_key}")
+                    # Метаданные для файла в S3
+                    metadata = {
+                        'device': device_folder,
+                        'original_filename': source_path.name,
+                        'upload_date': datetime.now().isoformat()
+                    }
+
+                    logger.info(f"Загрузка в S3: {s3_key}")
+
+                    # Загружаем файл в S3
+                    s3_success = self.s3_uploader.upload_file(
+                        file_path=destination_path,
+                        s3_key=s3_key,
+                        storage_class=storage_class,
+                        metadata=metadata
+                    )
+
+                    if s3_success:
+                        result['s3_key'] = s3_key
+                        result['s3_uploaded'] = True
+                        result['s3_already_exists'] = False
+                        logger.info(f"✓ Файл загружен в S3: {s3_key}")
+                    else:
+                        logger.warning(f"⚠ Не удалось загрузить файл в S3: {s3_key}")
 
             return result
 
@@ -281,10 +314,22 @@ class FileManager:
         copied_files = []
         total_size_mb = 0
 
-        for i, source_file in enumerate(new_files, 1):
+        # Функция для копирования одного файла (выполняется в отдельном потоке)
+        def _copy_single_file(source_file: Path, file_index: int, total_files: int):
+            """Копирование одного файла с обработкой ошибок"""
             try:
                 file_size_mb = source_file.stat().st_size / (1024 * 1024)
-                logger.info(f"   [{i}/{len(new_files)}] Копирую: {source_file.name} ({file_size_mb:.1f} MB)")
+                logger.info(f"   [{file_index}/{total_files}] Копирую: {source_file.name} ({file_size_mb:.1f} MB)")
+
+                # Telegram: уведомление о начале копирования файла
+                if self.telegram_notifier:
+                    self.telegram_notifier.notify_file_copied(
+                        file_num=file_index,
+                        total_files=total_files,
+                        filename=source_file.name,
+                        size_mb=file_size_mb,
+                        device_path=str(source_file)
+                    )
 
                 # Копируем файл (и загружаем в S3 если включено)
                 copy_result = self.copy_file(source_file, device_name)
@@ -303,22 +348,74 @@ class FileManager:
                     "processed": False,
                     # S3 информация
                     "s3_key": copy_result.get('s3_key'),
-                    "s3_uploaded": copy_result.get('s3_uploaded', False)
+                    "s3_uploaded": copy_result.get('s3_uploaded', False),
+                    "s3_already_exists": copy_result.get('s3_already_exists', False)
                 }
-
-                self.processed_files[file_key] = file_info
-                copied_files.append(file_info)
-                total_size_mb += file_size_mb
 
                 logger.info(f"        ✓ Скопирован в: {destination_path.relative_to(self.local_storage_path)}")
                 if copy_result.get('s3_uploaded'):
-                    logger.info(f"        ✓ Загружен в S3: {copy_result['s3_key']}")
+                    if copy_result.get('s3_already_exists'):
+                        logger.info(f"        ⏩ Уже в S3: {copy_result['s3_key']}")
+
+                        # Отправляем Telegram уведомление о существующем файле в S3
+                        if self.telegram_notifier:
+                            self.telegram_notifier.notify_s3_already_exists(
+                                s3_key=copy_result['s3_key'],
+                                size_mb=file_size_mb
+                            )
+                    else:
+                        logger.info(f"        ✓ Загружен в S3: {copy_result['s3_key']}")
+
+                        # Отправляем Telegram уведомление о загрузке в S3
+                        if self.telegram_notifier:
+                            self.telegram_notifier.notify_s3_upload(
+                                filename=source_file.name,
+                                s3_key=copy_result['s3_key'],
+                                size_mb=file_size_mb
+                            )
+
+                # Возвращаем результат: (индекс, file_key, file_info, размер, ошибка)
+                return (file_index, file_key, file_info, file_size_mb, None)
 
             except Exception as e:
-                logger.error(f"        ✗ Ошибка: {e}")
+                logger.error(f"        ✗ Ошибка при копировании {source_file.name}: {e}")
+                return (file_index, None, None, 0, str(e))
+
+        # Запускаем параллельное копирование через ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Создаем задачи для всех файлов
+            futures = {}
+            for i, source_file in enumerate(new_files, 1):
+                future = executor.submit(_copy_single_file, source_file, i, len(new_files))
+                futures[future] = source_file
+
+            # Собираем результаты по мере завершения
+            results = []
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+
+            # Сортируем результаты по индексу для сохранения порядка
+            results.sort(key=lambda x: x[0])
+
+            # Обрабатываем результаты
+            errors = []
+            for file_index, file_key, file_info, size_mb, error in results:
+                if error:
+                    errors.append(error)
+                else:
+                    self.processed_files[file_key] = file_info
+                    copied_files.append(file_info)
+                    total_size_mb += size_mb
 
         # Сохраняем БД
         self._save_processed_files()
+
+        # Логируем ошибки если были
+        if errors:
+            logger.warning(f"\n⚠️  Ошибки при копировании {len(errors)} файлов:")
+            for error in errors:
+                logger.warning(f"   - {error}")
 
         logger.info(f"\n📊 Итого скопировано: {len(copied_files)}/{len(new_files)} файлов, {total_size_mb:.1f} MB")
         return copied_files

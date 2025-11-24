@@ -35,7 +35,7 @@ class USBMonitor:
 
     @staticmethod
     def get_mounted_devices() -> List[str]:
-        """Получить список смонтированных USB устройств"""
+        """Получить список смонтированных USB устройств с фильтрацией по label PERU_"""
         devices = []
 
         for partition in psutil.disk_partitions(all=False):
@@ -48,7 +48,13 @@ class USBMonitor:
                 # Исключаем системный диск macOS
                 if mount_point not in ['/', '/Volumes/Macintosh HD']:
                     if os.path.exists(mount_point) and os.path.isdir(mount_point):
-                        devices.append(mount_point)
+                        # Проверяем label устройства - только PERU_*
+                        device_info = USBMonitor.get_device_info(mount_point)
+                        label = device_info.get('label') or ''
+                        if label.startswith('PERU_'):
+                            devices.append(mount_point)
+                        else:
+                            logger.debug(f"Устройство {mount_point} пропущено: label '{label}' не начинается с PERU_")
             # Дополнительная проверка для removable устройств
             elif partition.device.startswith('/dev/sd'):
                 try:
@@ -58,7 +64,13 @@ class USBMonitor:
                     if os.path.exists(removable_path):
                         with open(removable_path, 'r') as f:
                             if f.read().strip() == '1':
-                                devices.append(mount_point)
+                                # Проверяем label устройства - только PERU_*
+                                device_info = USBMonitor.get_device_info(mount_point)
+                                label = device_info.get('label') or ''
+                                if label.startswith('PERU_'):
+                                    devices.append(mount_point)
+                                else:
+                                    logger.debug(f"Устройство {mount_point} пропущено: label '{label}' не начинается с PERU_")
                 except Exception as e:
                     logger.debug(f"Ошибка проверки устройства {partition.device}: {e}")
 
@@ -95,12 +107,29 @@ class USBMonitor:
         logger.info("Запуск мониторинга USB устройств...")
         logger.info(f"Интервал проверки: {self.check_interval} сек")
 
+        # Флаг первого запуска - проверяем уже подключенные устройства
+        first_run = True
+
         try:
             while True:
                 new_devices = self.detect_new_devices()
 
-                if new_devices and callback:
-                    for device in new_devices:
+                # Устройства для обработки
+                devices_to_process = []
+
+                # При первом запуске обрабатываем все уже подключенные устройства
+                if first_run:
+                    current_devices = list(self.known_devices)
+                    if current_devices:
+                        logger.info(f"Первый запуск: проверка {len(current_devices)} уже подключенных устройств...")
+                        devices_to_process.extend(current_devices)
+                    first_run = False
+
+                # Добавляем новые устройства
+                devices_to_process.extend(new_devices)
+
+                if devices_to_process and callback:
+                    for device in devices_to_process:
                         # Проверяем что устройство не обрабатывается в данный момент
                         if device in self.processing_devices:
                             logger.info(f"⚠️  Устройство {device} уже обрабатывается, пропускаем")
@@ -189,6 +218,32 @@ class USBMonitor:
             except Exception as e:
                 logger.debug(f"Не удалось получить LABEL для {device}: {e}")
 
+            # На macOS используем diskutil для получения label
+            if not info['label'] and device:
+                try:
+                    result = subprocess.run(
+                        ['diskutil', 'info', device],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        for line in result.stdout.split('\n'):
+                            if 'Volume Name:' in line:
+                                label = line.split(':', 1)[1].strip()
+                                if label and label != 'Not applicable (no file system)':
+                                    info['label'] = label
+                                break
+                except Exception as e:
+                    logger.debug(f"Не удалось получить label через diskutil для {device}: {e}")
+
+            # Fallback: если label всё ещё не найден, используем имя точки монтирования
+            if not info['label']:
+                mount_name = Path(mount_point).name
+                # Исключаем системные директории
+                if not mount_name.startswith('System') and mount_name not in ['VM', 'Preboot', 'Update', 'Data', 'Hardware', 'xarts', 'iSCPreboot']:
+                    info['label'] = mount_name
+
             # Получаем serial number (если доступен)
             try:
                 # Извлекаем имя устройства без номера раздела (sdb1 -> sdb)
@@ -208,7 +263,7 @@ class USBMonitor:
             elif info['serial']:
                 info['unique_id'] = f"SN_{info['serial']}"
             elif info['label']:
-                info['unique_id'] = f"LBL_{info['label']}"
+                info['unique_id'] = info['label']
             else:
                 # Последний вариант - используем имя точки монтирования
                 info['unique_id'] = Path(mount_point).name
