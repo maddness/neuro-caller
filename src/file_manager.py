@@ -7,10 +7,12 @@ import shutil
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Set, Dict, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +49,19 @@ class FileManager:
         # Загружаем БД обработанных файлов
         self.processed_files = self._load_processed_files()
 
+        # Lock для потокобезопасной записи метаданных
+        self._metadata_lock = Lock()
+
         # S3 uploader (будет установлен из main.py если S3_ENABLED=true)
         self.s3_uploader = None
 
         # Telegram notifier (будет установлен из main.py)
         self.telegram_notifier = None
+
+        # Tracker client (будет установлен из main.py)
+        self.tracker_client = None
+        self.s3_presigned_url_expiry = 7 * 24 * 3600  # 7 дней по умолчанию
+        self.transcribe_conversation = False
 
     def _load_processed_files(self) -> Dict[str, dict]:
         """Загрузка БД обработанных файлов"""
@@ -65,12 +75,28 @@ class FileManager:
         return {}
 
     def _save_processed_files(self):
-        """Сохранение БД обработанных файлов"""
+        """Атомарное сохранение БД обработанных файлов через временный файл"""
         try:
-            with open(self.db_path, 'w', encoding='utf-8') as f:
+            temp_path = self.db_path.with_suffix('.json.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(self.processed_files, f, indent=2, ensure_ascii=False)
+            os.replace(temp_path, self.db_path)  # Атомарная операция
         except Exception as e:
             logger.error(f"Ошибка сохранения БД обработанных файлов: {e}")
+
+    def update_metadata(self, file_key: str, updates: dict):
+        """
+        Атомарное обновление метаданных файла с потокобезопасностью
+
+        Args:
+            file_key: Ключ файла (device_filename)
+            updates: Словарь с обновлениями
+        """
+        with self._metadata_lock:
+            if file_key not in self.processed_files:
+                self.processed_files[file_key] = {}
+            self.processed_files[file_key].update(updates)
+            self._save_processed_files()
 
     @staticmethod
     def calculate_file_hash(file_path: Path) -> str:
@@ -93,6 +119,26 @@ class FileManager:
         except Exception as e:
             logger.error(f"Ошибка вычисления хеша {file_path}: {e}")
             return ""
+
+    @staticmethod
+    def extract_date_from_filename(filename: str) -> str:
+        """
+        Извлечь дату из имени файла формата R20251124-120931.WAV
+
+        Args:
+            filename: Имя файла
+
+        Returns:
+            Дата в формате YYYY_MM_DD или текущая дата если парсинг не удался
+        """
+        # Паттерн: R + 8 цифр (YYYYMMDD) + - + 6 цифр (HHMMSS)
+        match = re.match(r'R(\d{4})(\d{2})(\d{2})-\d{6}', filename)
+        if match:
+            year, month, day = match.groups()
+            return f"{year}_{month}_{day}"
+
+        # Fallback на текущую дату
+        return datetime.now().strftime("%Y_%m_%d")
 
     def find_audio_files(self, device_path: str) -> List[Path]:
         """
@@ -182,7 +228,13 @@ class FileManager:
         logger.info(f"Обнаружено {len(new_files)} новых файлов")
         return new_files
 
-    def copy_file(self, source_path: Path, device_name: str = None, storage_class: str = "STANDARD") -> Dict:
+    def copy_file(
+        self,
+        source_path: Path,
+        device_name: str = None,
+        storage_class: str = "STANDARD",
+        file_key: str = None
+    ) -> Dict:
         """
         Копирование файла в локальное хранилище и загрузка в S3 (если включено)
 
@@ -190,6 +242,7 @@ class FileManager:
             source_path: Путь к исходному файлу
             device_name: Имя устройства (для организации)
             storage_class: Класс хранилища S3 (STANDARD, COLD, ICE)
+            file_key: Ключ файла для отслеживания stage (опционально)
 
         Returns:
             Словарь с информацией о файле:
@@ -225,18 +278,39 @@ class FileManager:
         }
 
         try:
+            # STAGE: copying - перед копированием
+            if file_key:
+                self.update_metadata(file_key, {
+                    "stage": "copying",
+                    "original_path": str(source_path),
+                    "device": device_folder,
+                    "size_bytes": source_path.stat().st_size
+                })
+
             # ЭТАП 1: Копируем файл на локальный диск
             shutil.copy2(source_path, destination_path)
             logger.info(f"Файл скопирован: {source_path.name} -> {destination_path}")
             result['local_path'] = destination_path
 
+            # STAGE: copied - после копирования
+            if file_key:
+                self.update_metadata(file_key, {
+                    "stage": "copied",
+                    "local_path": str(destination_path),
+                    "copied_at": datetime.now().isoformat()
+                })
+
             # ЭТАП 2: Загружаем в S3 (если включено)
             if self.s3_uploader:
                 # Формируем S3 ключ: YYYY_MM_DD/device_name/original_filename
                 # ВАЖНО: Используем оригинальное имя файла БЕЗ суффиксов (_1, _2 и т.д.)
-                # Дата с подчеркиваниями, не дефисами!
-                date_underscored = datetime.now().strftime("%Y_%m_%d")
+                # Дата извлекается из имени файла (R20251124-120931.WAV → 2025_11_24)
+                date_underscored = self.extract_date_from_filename(source_path.name)
                 s3_key = f"{date_underscored}/{device_folder}/{source_path.name}"
+
+                # STAGE: s3_uploading - перед проверкой/загрузкой
+                if file_key:
+                    self.update_metadata(file_key, {"stage": "s3_uploading"})
 
                 # Проверяем существование файла в S3 по оригинальному имени
                 if self.s3_uploader.file_exists(s3_key):
@@ -244,6 +318,13 @@ class FileManager:
                     result['s3_key'] = s3_key
                     result['s3_uploaded'] = True
                     result['s3_already_exists'] = True
+
+                    # STAGE: s3_uploaded - файл уже был в S3
+                    if file_key:
+                        self.update_metadata(file_key, {
+                            "stage": "s3_uploaded",
+                            "s3_key": s3_key
+                        })
                 else:
                     # Метаданные для файла в S3
                     metadata = {
@@ -267,6 +348,13 @@ class FileManager:
                         result['s3_uploaded'] = True
                         result['s3_already_exists'] = False
                         logger.info(f"✓ Файл загружен в S3: {s3_key}")
+
+                        # STAGE: s3_uploaded - файл загружен
+                        if file_key:
+                            self.update_metadata(file_key, {
+                                "stage": "s3_uploaded",
+                                "s3_key": s3_key
+                            })
                     else:
                         logger.warning(f"⚠ Не удалось загрузить файл в S3: {s3_key}")
 
@@ -321,6 +409,9 @@ class FileManager:
                 file_size_mb = source_file.stat().st_size / (1024 * 1024)
                 logger.info(f"   [{file_index}/{total_files}] Копирую: {source_file.name} ({file_size_mb:.1f} MB)")
 
+                # Формируем уникальный ключ ДО копирования: device_filename
+                file_key = f"{device_name}_{source_file.name}"
+
                 # Telegram: уведомление о начале копирования файла
                 if self.telegram_notifier:
                     self.telegram_notifier.notify_file_copied(
@@ -332,25 +423,12 @@ class FileManager:
                     )
 
                 # Копируем файл (и загружаем в S3 если включено)
-                copy_result = self.copy_file(source_file, device_name)
+                # file_key передаётся для отслеживания stage
+                copy_result = self.copy_file(source_file, device_name, file_key=file_key)
                 destination_path = copy_result['local_path']
 
-                # Формируем уникальный ключ: device_filename
-                file_key = f"{device_name}_{source_file.name}"
-
-                # Регистрируем в БД
-                file_info = {
-                    "original_path": str(source_file),
-                    "local_path": str(destination_path),
-                    "device": device_name,
-                    "size_bytes": source_file.stat().st_size,
-                    "copied_at": datetime.now().isoformat(),
-                    "processed": False,
-                    # S3 информация
-                    "s3_key": copy_result.get('s3_key'),
-                    "s3_uploaded": copy_result.get('s3_uploaded', False),
-                    "s3_already_exists": copy_result.get('s3_already_exists', False)
-                }
+                # Получаем file_info из processed_files (уже сохранено через update_metadata)
+                file_info = self.processed_files.get(file_key, {})
 
                 logger.info(f"        ✓ Скопирован в: {destination_path.relative_to(self.local_storage_path)}")
                 if copy_result.get('s3_uploaded'):
@@ -373,6 +451,47 @@ class FileManager:
                                 s3_key=copy_result['s3_key'],
                                 size_mb=file_size_mb
                             )
+
+                # Создание тикета в Tracker (если включен)
+                if self.tracker_client and self.tracker_client.enabled:
+                    if not copy_result.get('s3_already_exists'):
+                        # STAGE: tracker_creating
+                        self.update_metadata(file_key, {"stage": "tracker_creating"})
+
+                        presigned_url = self.s3_uploader.generate_presigned_url(
+                            s3_key=copy_result['s3_key'],
+                            expiration=self.s3_presigned_url_expiry
+                        )
+                        if presigned_url:
+                            from src.tracker_client import TrackerClient
+                            summary = TrackerClient.build_summary_from_s3_key(copy_result['s3_key'])
+                            issue = self.tracker_client.create_issue(
+                                summary=summary,
+                                description=presigned_url,
+                                transcribe_conversation=self.transcribe_conversation
+                            )
+                            if issue:
+                                issue_key = issue.get('key')
+                                issue_url = issue.get('self')
+                                logger.info(f"        ✓ Тикет: {issue_key}")
+
+                                # STAGE: completed
+                                self.update_metadata(file_key, {
+                                    "stage": "completed",
+                                    "tracker_issue_key": issue_key,
+                                    "tracker_url": issue_url
+                                })
+
+                                # Telegram уведомление
+                                if self.telegram_notifier:
+                                    self.telegram_notifier.notify_tracker_issue_created(
+                                        issue_key=issue_key,
+                                        s3_key=copy_result['s3_key'],
+                                        issue_url=issue_url
+                                    )
+                    else:
+                        # Файл уже был в S3 - ставим completed
+                        self.update_metadata(file_key, {"stage": "completed"})
 
                 # Возвращаем результат: (индекс, file_key, file_info, размер, ошибка)
                 return (file_index, file_key, file_info, file_size_mb, None)
@@ -404,8 +523,12 @@ class FileManager:
                 if error:
                     errors.append(error)
                 else:
-                    self.processed_files[file_key] = file_info
-                    copied_files.append(file_info)
+                    # update вместо перезаписи, чтобы сохранить stage
+                    if file_key in self.processed_files:
+                        self.processed_files[file_key].update(file_info)
+                    else:
+                        self.processed_files[file_key] = file_info
+                    copied_files.append(self.processed_files[file_key])
                     total_size_mb += size_mb
 
         # Сохраняем БД
@@ -446,6 +569,62 @@ class FileManager:
                 unprocessed.append(file_info)
 
         return unprocessed
+
+    def recover_incomplete_tasks(self) -> List[Dict]:
+        """
+        Восстановление незавершенных задач после перезапуска.
+
+        Проверяет все файлы в БД и возвращает список тех,
+        которые не дошли до стадии 'completed'.
+
+        Returns:
+            Список задач для восстановления:
+            [{"file_key": str, "meta": dict, "action": str}]
+
+            action может быть:
+            - "copy": нужно скопировать заново (stage: copying)
+            - "s3_upload": нужно загрузить в S3 (stage: copied, s3_uploading)
+            - "tracker": нужно создать тикет (stage: s3_uploaded, tracker_creating)
+        """
+        incomplete = []
+
+        for file_key, meta in self.processed_files.items():
+            stage = meta.get("stage")
+
+            # Пропускаем completed и файлы без stage (старый формат)
+            if stage == "completed" or stage is None:
+                continue
+
+            if stage == "copying":
+                # Копирование прервано - нужно скопировать заново
+                incomplete.append({
+                    "file_key": file_key,
+                    "meta": meta,
+                    "action": "copy"
+                })
+
+            elif stage in ("copied", "s3_uploading"):
+                # Нужна загрузка в S3
+                incomplete.append({
+                    "file_key": file_key,
+                    "meta": meta,
+                    "action": "s3_upload"
+                })
+
+            elif stage in ("s3_uploaded", "tracker_creating"):
+                # Нужно создание тикета
+                incomplete.append({
+                    "file_key": file_key,
+                    "meta": meta,
+                    "action": "tracker"
+                })
+
+        if incomplete:
+            logger.info(f"🔄 Recovery: найдено {len(incomplete)} незавершенных задач")
+            for task in incomplete:
+                logger.info(f"   - {task['file_key']}: stage={task['meta'].get('stage')}, action={task['action']}")
+
+        return incomplete
 
 
 if __name__ == "__main__":

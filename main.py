@@ -168,6 +168,11 @@ class TranscriptionPipeline:
         if tracker_enabled and self.tracker.enabled:
             self.logger.info(f"✅ Яндекс Трекер инициализирован (очередь: {tracker_queue})")
 
+        # Передаём Tracker в FileManager для создания тикетов в ThreadPoolExecutor
+        self.file_manager.tracker_client = self.tracker
+        self.file_manager.s3_presigned_url_expiry = self.s3_presigned_url_expiry
+        self.file_manager.transcribe_conversation = self.transcribe_conversation
+
         self.logger.info("✅ Пайплайн готов к работе")
 
     def save_transcription_to_file(
@@ -328,6 +333,14 @@ ID: {transcription_id}
             )
 
         # ============================================================
+        # RECOVERY: ВОССТАНОВЛЕНИЕ НЕЗАВЕРШЁННЫХ ЗАДАЧ
+        # ============================================================
+        incomplete_tasks = self.file_manager.recover_incomplete_tasks()
+        if incomplete_tasks:
+            self.logger.info(f"\n🔄 Восстановление {len(incomplete_tasks)} незавершённых задач...")
+            self.process_incomplete_tasks(incomplete_tasks)
+
+        # ============================================================
         # ЭТАП 1: КОПИРОВАНИЕ ВСЕХ ФАЙЛОВ С ФЛЕШКИ НА ЖЕСТКИЙ ДИСК
         # ============================================================
         self.logger.info("📋 ЭТАП 1: Поиск и копирование новых аудиофайлов...")
@@ -351,54 +364,6 @@ ID: {transcription_id}
             total_size_mb=total_size_mb,
             device_name=device_name
         )
-
-        # ============================================================
-        # ЯНДЕКС ТРЕКЕР: СОЗДАНИЕ ЗАДАЧ ДЛЯ ФАЙЛОВ В S3
-        # ============================================================
-        if self.s3_enabled and self.s3_uploader and self.tracker.enabled:
-            self.logger.info("\n📋 Создание задач в Яндекс Трекере...")
-
-            for file_info in copied_files:
-                # Проверяем что файл загружен в S3
-                if file_info.get('s3_uploaded') and file_info.get('s3_key'):
-                    s3_key = file_info['s3_key']
-                    filename = Path(file_info['local_path']).name
-                    already_exists = file_info.get('s3_already_exists', False)
-
-                    # Пропускаем файлы, которые уже были в S3
-                    if already_exists:
-                        self.logger.info(f"   ⏩ Файл уже был в S3, пропускаем создание задачи: {filename}")
-                        continue
-
-                    # Генерируем presigned URL для описания задачи
-                    presigned_url = self.s3_uploader.generate_presigned_url(
-                        s3_key=s3_key,
-                        expiration=self.s3_presigned_url_expiry
-                    )
-
-                    if presigned_url:
-                        # Создание задачи в Яндекс Трекере
-                        summary = TrackerClient.build_summary_from_s3_key(s3_key)
-                        issue = self.tracker.create_issue(
-                            summary=summary,
-                            description=presigned_url,
-                            transcribe_conversation=self.transcribe_conversation
-                        )
-                        if issue:
-                            issue_key = issue.get('key')
-                            issue_url = issue.get('self')  # URL задачи в API
-                            self.logger.info(f"   ✓ Задача создана: {issue_key} для {filename}")
-
-                            # Отправляем Telegram уведомление о созданной задаче
-                            self.telegram.notify_tracker_issue_created(
-                                issue_key=issue_key,
-                                s3_key=s3_key,
-                                issue_url=issue_url
-                            )
-                    else:
-                        self.logger.warning(f"   ⚠ Не удалось создать ссылку для задачи: {filename}")
-
-            self.logger.info("✅ Задачи в Трекере созданы")
 
         # ============================================================
         # ПРОВЕРКА: НУЖНА ЛИ ТРАНСКРИБАЦИЯ
@@ -441,6 +406,138 @@ ID: {transcription_id}
             files_count=len(copied_files),
             device_name=device_name
         )
+
+    def process_incomplete_tasks(self, incomplete_tasks: list):
+        """
+        Обработка незавершённых задач после recovery.
+
+        Args:
+            incomplete_tasks: Список задач от recover_incomplete_tasks()
+        """
+        from pathlib import Path
+
+        for task in incomplete_tasks:
+            file_key = task["file_key"]
+            meta = task["meta"]
+            action = task["action"]
+
+            self.logger.info(f"   🔄 {file_key}: {action}")
+
+            if action == "copy":
+                # Копирование прервано - файл возможно повреждён
+                # Удаляем из метаданных, чтобы при следующем сканировании
+                # он был найден как новый
+                original_path = meta.get("original_path")
+                if original_path and Path(original_path).exists():
+                    # Удаляем запись из метаданных
+                    if file_key in self.file_manager.processed_files:
+                        del self.file_manager.processed_files[file_key]
+                        self.file_manager._save_processed_files()
+                    self.logger.info(f"      → Удалён из метаданных, будет скопирован заново")
+                else:
+                    self.logger.warning(f"      → Исходный файл не найден: {original_path}")
+
+            elif action == "s3_upload":
+                # Нужна загрузка в S3
+                local_path = meta.get("local_path")
+                if local_path and Path(local_path).exists():
+                    device = meta.get("device", "unknown")
+
+                    # Формируем S3 ключ с датой из имени файла
+                    from src.file_manager import FileManager
+                    original_filename = Path(meta.get("original_path", local_path)).name
+                    date_underscored = FileManager.extract_date_from_filename(original_filename)
+                    s3_key = f"{date_underscored}/{device}/{original_filename}"
+
+                    # STAGE: s3_uploading
+                    self.file_manager.update_metadata(file_key, {"stage": "s3_uploading"})
+
+                    # Проверяем существование в S3
+                    if self.s3_uploader.file_exists(s3_key):
+                        self.logger.info(f"      → Уже в S3: {s3_key}")
+                        self.file_manager.update_metadata(file_key, {
+                            "stage": "s3_uploaded",
+                            "s3_key": s3_key
+                        })
+                        # Telegram уведомление
+                        if self.telegram:
+                            size_mb = meta.get("size_bytes", 0) / (1024 * 1024)
+                            self.telegram.notify_s3_already_exists(s3_key=s3_key, size_mb=size_mb)
+                    else:
+                        # Загружаем
+                        s3_success = self.s3_uploader.upload_file(
+                            file_path=Path(local_path),
+                            s3_key=s3_key
+                        )
+                        if s3_success:
+                            self.logger.info(f"      → Загружен в S3: {s3_key}")
+                            self.file_manager.update_metadata(file_key, {
+                                "stage": "s3_uploaded",
+                                "s3_key": s3_key
+                            })
+                            # Telegram уведомление
+                            if self.telegram:
+                                size_mb = meta.get("size_bytes", 0) / (1024 * 1024)
+                                self.telegram.notify_s3_upload(
+                                    filename=original_filename,
+                                    s3_key=s3_key,
+                                    size_mb=size_mb
+                                )
+                        else:
+                            self.logger.error(f"      → Ошибка загрузки в S3")
+                else:
+                    self.logger.warning(f"      → Локальный файл не найден: {local_path}")
+
+            elif action == "tracker":
+                # Нужно создание тикета
+                s3_key = meta.get("s3_key")
+                if s3_key and not meta.get("tracker_issue_key"):
+                    # STAGE: tracker_creating
+                    self.file_manager.update_metadata(file_key, {"stage": "tracker_creating"})
+
+                    # Генерируем presigned URL
+                    presigned_url = self.s3_uploader.generate_presigned_url(
+                        s3_key=s3_key,
+                        expiration=self.s3_presigned_url_expiry
+                    )
+
+                    if presigned_url:
+                        from src.tracker_client import TrackerClient
+                        summary = TrackerClient.build_summary_from_s3_key(s3_key)
+                        issue = self.tracker.create_issue(
+                            summary=summary,
+                            description=presigned_url,
+                            transcribe_conversation=self.transcribe_conversation
+                        )
+                        if issue:
+                            issue_key = issue.get('key')
+                            issue_url = issue.get('self')
+                            self.logger.info(f"      → Задача создана: {issue_key}")
+
+                            # STAGE: completed
+                            self.file_manager.update_metadata(file_key, {
+                                "stage": "completed",
+                                "tracker_issue_key": issue_key,
+                                "tracker_url": issue_url
+                            })
+
+                            # Telegram уведомление
+                            if self.telegram:
+                                self.telegram.notify_tracker_issue_created(
+                                    issue_key=issue_key,
+                                    s3_key=s3_key,
+                                    issue_url=issue_url
+                                )
+                        else:
+                            self.logger.error(f"      → Ошибка создания тикета")
+                    else:
+                        self.logger.error(f"      → Не удалось сгенерировать presigned URL")
+                elif meta.get("tracker_issue_key"):
+                    # Тикет уже создан, просто обновляем stage
+                    self.file_manager.update_metadata(file_key, {"stage": "completed"})
+                    self.logger.info(f"      → Тикет уже существует: {meta.get('tracker_issue_key')}")
+
+        self.logger.info(f"✅ Recovery завершён: {len(incomplete_tasks)} задач обработано")
 
     def process_file(self, file_info: dict, file_num: int = 1, total_files: int = 1):
         """
