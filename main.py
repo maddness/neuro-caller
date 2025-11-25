@@ -21,7 +21,6 @@ from src.usb_monitor import USBMonitor
 from src.file_manager import FileManager
 from src.audio_processor import AudioProcessor
 from src.assemblyai_transcriber import AssemblyAITranscriber
-from src.database import TranscriptionDatabase
 from src.telegram_notifier import TelegramNotifier
 from src.s3_uploader import S3Uploader
 from src.tracker_client import TrackerClient
@@ -124,8 +123,6 @@ class TranscriptionPipeline:
             self.transcriber = None
             self.logger.info("Транскрибация отключена (TRANSCRIBE_CONVERSATION=false)")
 
-        self.database = TranscriptionDatabase()
-
         # Telegram уведомления
         self.telegram = TelegramNotifier(
             bot_token=telegram_bot_token,
@@ -181,7 +178,6 @@ class TranscriptionPipeline:
         filename: str,
         device_name: str,
         audio_info: dict,
-        transcription_id: int,
         transcription: dict = None
     ):
         """
@@ -192,7 +188,6 @@ class TranscriptionPipeline:
             filename: Имя исходного файла
             device_name: Имя устройства
             audio_info: Информация об аудио
-            transcription_id: ID транскрипции в БД
             transcription: Полные данные транскрибации (для diarization)
         """
         import os
@@ -216,7 +211,6 @@ class TranscriptionPipeline:
 ТРАНСКРИПЦИЯ АУДИОЗАПИСИ
 {'='*80}
 
-ID: {transcription_id}
 Файл: {filename}
 Устройство: {device_name}
 Дата обработки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -589,27 +583,6 @@ ID: {transcription_id}
                 num_speakers=self.num_speakers
             )
 
-            # Сохранение в базу данных
-            self.logger.info("💾 Сохранение транскрипции в БД...")
-
-            transcription_id = self.database.add_transcription_with_speakers(
-                file_hash=file_key or "",
-                original_filename=file_info['original_path'],
-                audio_file_path=str(file_path),
-                transcription_text=transcription['text'],
-                speaker_segments=transcription.get('segments', []),
-                device_name=file_info.get('device'),
-                language=transcription.get('language', 'ru'),
-                duration_seconds=audio_info.get('duration_seconds'),
-                metadata={
-                    'file_size_mb': audio_info.get('file_size_mb'),
-                    'channels': audio_info.get('channels'),
-                    'sample_rate': audio_info.get('frame_rate'),
-                    'total_speakers': transcription.get('total_speakers'),
-                    'speaker_stats': transcription.get('speaker_stats')
-                }
-            )
-
             # Отмечаем файл как обработанный
             if file_key:
                 self.file_manager.mark_as_processed(file_key)
@@ -620,14 +593,13 @@ ID: {transcription_id}
                 filename=filename,
                 device_name=file_info.get('device', 'unknown'),
                 audio_info=audio_info,
-                transcription_id=transcription_id,
-                transcription=transcription  # Полные данные транскрибации
+                transcription=transcription
             )
 
             word_count = len(transcription['text'].split())
             char_count = len(transcription['text'])
 
-            self.logger.info(f"\n✅ ГОТОВО! ID транскрипции: {transcription_id}")
+            self.logger.info(f"\n✅ ГОТОВО!")
             self.logger.info(f"   Символов: {char_count}, Слов: {word_count}")
             self.logger.info(f"   Фрагмент: {transcription['text'][:100]}...")
 
@@ -765,12 +737,6 @@ def process_mode(args):
         # Формируем ключ файла: manual_filename
         file_key = f"manual_{path.name}"
 
-        # Если --force, удаляем существующую транскрипцию
-        if getattr(args, 'force', False):
-            deleted = pipeline.database.delete_by_file_hash(file_key)
-            if deleted:
-                logger.info(f"🗑️ Старая транскрипция удалена (--force)")
-
         file_info = {
             'local_path': str(path),
             'original_path': str(path),
@@ -778,62 +744,6 @@ def process_mode(args):
             'file_key': file_key
         }
         pipeline.process_file(file_info)
-
-
-def stats_mode(args):
-    """Режим просмотра статистики"""
-    logger = logging.getLogger("stats_mode")
-
-    db = TranscriptionDatabase()
-    stats = db.get_statistics()
-
-    print("\n" + "="*60)
-    print("СТАТИСТИКА ТРАНСКРИПЦИЙ")
-    print("="*60)
-
-    print(f"\nОбщая информация:")
-    print(f"  Всего транскрипций: {stats['total_transcriptions']}")
-    print(f"  Общая длительность: {stats['total_duration_seconds']/3600:.1f} часов")
-    print(f"  Всего слов: {stats['total_words']:,}")
-    print(f"  Уникальных устройств: {stats['unique_devices']}")
-
-    if stats['by_device']:
-        print(f"\nПо устройствам:")
-        for device in stats['by_device']:
-            print(f"  {device['device_name']}: {device['count']} файлов, "
-                  f"{device['duration_seconds']/3600:.1f} часов")
-
-    if stats['by_day']:
-        print(f"\nПоследние дни:")
-        for day in stats['by_day'][:7]:
-            print(f"  {day['date']}: {day['count']} файлов")
-
-    print("\n" + "="*60 + "\n")
-
-
-def search_mode(args):
-    """Режим поиска в транскрипциях"""
-    logger = logging.getLogger("search_mode")
-
-    db = TranscriptionDatabase()
-
-    results = db.search_transcriptions(
-        query=args.query,
-        device_name=args.device,
-        date_from=args.date_from,
-        date_to=args.date_to,
-        limit=args.limit
-    )
-
-    print(f"\nНайдено результатов: {len(results)}\n")
-
-    for result in results:
-        print(f"ID: {result['id']}")
-        print(f"Файл: {result['original_filename']}")
-        print(f"Устройство: {result['device_name']}")
-        print(f"Дата: {result['created_at']}")
-        print(f"Текст: {result['transcription_text'][:200]}...")
-        print("-" * 60)
 
 
 def main():
@@ -890,7 +800,6 @@ def main():
     # Команда: process
     process_parser = subparsers.add_parser("process", help="Обработать устройство или файл")
     process_parser.add_argument("path", help="Путь к устройству или файлу")
-    process_parser.add_argument("--force", "-f", action="store_true", help="Перезаписать существующую транскрипцию")
     process_parser.add_argument("--assemblyai-api-key", default=os.getenv("ASSEMBLYAI_API_KEY"), help="AssemblyAI API ключ")
     process_parser.add_argument("--num-speakers", type=int, default=int(os.getenv("DEFAULT_NUM_SPEAKERS", "2")), help="Количество говорящих")
     process_parser.add_argument("--language", default=os.getenv("LANGUAGE", "es"), help="Язык аудио (ISO-639-1)")
@@ -913,17 +822,6 @@ def main():
     process_parser.add_argument("--transcribe-conversation", type=lambda x: x.lower() == 'true', default=os.getenv("TRANSCRIBE_CONVERSATION", "true").lower() == "true", help="Выполнять транскрибацию разговоров")
     process_parser.add_argument("--max-parallel-copies", type=int, default=int(os.getenv("MAX_PARALLEL_COPIES", "3")), help="Количество параллельных потоков для копирования файлов")
 
-    # Команда: stats
-    stats_parser = subparsers.add_parser("stats", help="Показать статистику")
-
-    # Команда: search
-    search_parser = subparsers.add_parser("search", help="Поиск в транскрипциях")
-    search_parser.add_argument("query", nargs="?", help="Поисковый запрос")
-    search_parser.add_argument("--device", help="Фильтр по устройству")
-    search_parser.add_argument("--date-from", help="Дата начала (YYYY-MM-DD)")
-    search_parser.add_argument("--date-to", help="Дата окончания (YYYY-MM-DD)")
-    search_parser.add_argument("--limit", type=int, default=20, help="Макс результатов")
-
     args = parser.parse_args()
 
     # Настройка логирования
@@ -934,10 +832,6 @@ def main():
         monitor_mode(args)
     elif args.command == "process":
         process_mode(args)
-    elif args.command == "stats":
-        stats_mode(args)
-    elif args.command == "search":
-        search_mode(args)
     else:
         parser.print_help()
 
