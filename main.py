@@ -17,9 +17,10 @@ load_dotenv()
 # Добавляем src в путь
 sys.path.insert(0, str(Path(__file__).parent))
 
+import subprocess
+
 from src.usb_monitor import USBMonitor
 from src.file_manager import FileManager
-from src.audio_processor import AudioProcessor
 from src.assemblyai_transcriber import AssemblyAITranscriber
 from src.telegram_notifier import TelegramNotifier
 from src.s3_uploader import S3Uploader
@@ -43,6 +44,35 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
         format=log_format,
         handlers=handlers
     )
+
+
+def get_audio_info(file_path: Path) -> dict:
+    """Получение информации об аудиофайле через ffprobe"""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries',
+             'format=duration,size', '-of', 'default=noprint_wrappers=1',
+             str(file_path)],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0:
+            duration = 0
+            for line in result.stdout.strip().split('\n'):
+                if line.startswith('duration='):
+                    duration = float(line.split('=')[1])
+
+            return {
+                "duration_seconds": duration,
+                "duration_minutes": duration / 60,
+                "file_size_mb": file_path.stat().st_size / (1024 * 1024),
+                "format": file_path.suffix.lstrip('.').lower()
+            }
+    except Exception:
+        pass
+    return {"duration_seconds": 0, "duration_minutes": 0, "file_size_mb": 0, "format": ""}
 
 
 class TranscriptionPipeline:
@@ -110,7 +140,6 @@ class TranscriptionPipeline:
         self.s3_presigned_url_expiry = s3_presigned_url_expiry
 
         self.file_manager = FileManager(max_workers=max_parallel_copies)
-        self.audio_processor = AudioProcessor()
 
         # Транскрайбер AssemblyAI (опциональный)
         if transcribe_conversation:
@@ -554,7 +583,7 @@ class TranscriptionPipeline:
 
         try:
             # Получение информации о файле
-            audio_info = self.audio_processor.get_audio_info(file_path)
+            audio_info = get_audio_info(file_path)
             self.logger.info(
                 f"📊 Файл: {audio_info['duration_minutes']:.1f} мин, "
                 f"{audio_info['file_size_mb']:.1f} MB, "
