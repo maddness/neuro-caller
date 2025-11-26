@@ -336,24 +336,11 @@ class TranscriptionPipeline:
             if device_info['uuid']:
                 self.logger.info(f"UUID: {device_info['uuid'][:16]}...")
             self.logger.info(f"{'='*60}\n")
-
-            # Telegram: уведомление о подключении устройства
-            self.telegram.notify_device_connected(
-                device_path=device_path,
-                device_id=device_name,
-                label=device_info.get('label')
-            )
         else:
             self.logger.info(f"\n{'='*60}")
             self.logger.info(f"Обработка устройства: {device_path}")
             self.logger.info(f"ID устройства: {device_name}")
             self.logger.info(f"{'='*60}\n")
-
-            # Telegram: уведомление о подключении устройства
-            self.telegram.notify_device_connected(
-                device_path=device_path,
-                device_id=device_name
-            )
 
         # ============================================================
         # RECOVERY: ВОССТАНОВЛЕНИЕ НЕЗАВЕРШЁННЫХ ЗАДАЧ
@@ -375,16 +362,12 @@ class TranscriptionPipeline:
             self.logger.info("✓ Новых файлов не найдено")
             return
 
-        # Вычисляем общий размер скопированных файлов
-        total_size_mb = sum(f.get('size_bytes', 0) for f in copied_files) / (1024 * 1024)
-
         self.logger.info(f"\n✅ ВСЕ ФАЙЛЫ СКОПИРОВАНЫ НА ЖЕСТКИЙ ДИСК: {len(copied_files)} файлов")
         self.logger.info("   Теперь можно безопасно отключить флешку")
 
         # Telegram: уведомление об окончании копирования
         self.telegram.notify_copying_complete(
             files_count=len(copied_files),
-            total_size_mb=total_size_mb,
             device_name=device_name
         )
 
@@ -394,15 +377,6 @@ class TranscriptionPipeline:
         if not self.transcribe_conversation:
             self.logger.info("\n⏹️  Транскрибация отключена (TRANSCRIBE_CONVERSATION=false)")
             self.logger.info("   Процесс завершен после создания задач в трекере")
-            self.logger.info(f"\n{'='*60}")
-            self.logger.info(f"✅ ВСЁ ГОТОВО! Обработано файлов: {len(copied_files)}")
-            self.logger.info(f"{'='*60}")
-
-            # Telegram: уведомление об окончании
-            self.telegram.notify_all_complete(
-                files_count=len(copied_files),
-                device_name=device_name
-            )
             return
 
         # ============================================================
@@ -419,16 +393,6 @@ class TranscriptionPipeline:
             self.logger.info(f"📝 Файл {i}/{len(copied_files)}: {Path(file_info['local_path']).name}")
             self.logger.info(f"{'─'*60}")
             self.process_file(file_info, file_num=i, total_files=len(copied_files))
-
-        self.logger.info(f"\n{'='*60}")
-        self.logger.info(f"✅ ВСЁ ГОТОВО! Обработано файлов: {len(copied_files)}")
-        self.logger.info(f"{'='*60}")
-
-        # Telegram: уведомление об окончании всей обработки
-        self.telegram.notify_all_complete(
-            files_count=len(copied_files),
-            device_name=device_name
-        )
 
     def process_incomplete_tasks(self, incomplete_tasks: list):
         """
@@ -464,13 +428,21 @@ class TranscriptionPipeline:
                 # Нужна загрузка в S3
                 local_path = meta.get("local_path")
                 if local_path and Path(local_path).exists():
-                    device = meta.get("device", "unknown")
+                    # Используем существующий s3_key если есть, иначе формируем новый
+                    s3_key = meta.get("s3_key")
+                    if not s3_key:
+                        # Извлекаем device из file_key (формат: DEVICE_filename.WAV)
+                        device = meta.get("device")
+                        if not device:
+                            # Пробуем извлечь из file_key: PERU_000_R20251126-120130.WAV
+                            parts = file_key.rsplit("_R", 1)
+                            device = parts[0] if len(parts) == 2 else "unknown"
 
-                    # Формируем S3 ключ с датой из имени файла
-                    from src.file_manager import FileManager
-                    original_filename = Path(meta.get("original_path", local_path)).name
-                    date_underscored = FileManager.extract_date_from_filename(original_filename)
-                    s3_key = f"{date_underscored}/{device}/{original_filename}"
+                        # Формируем S3 ключ с датой из имени файла
+                        from src.file_manager import FileManager
+                        original_filename = Path(meta.get("original_path", local_path)).name
+                        date_folder = FileManager.extract_date_from_filename(original_filename)
+                        s3_key = f"{date_folder}/{device}/{original_filename}"
 
                     # STAGE: s3_uploading
                     self.file_manager.update_metadata(file_key, {"stage": "s3_uploading"})
@@ -486,6 +458,37 @@ class TranscriptionPipeline:
                         if self.telegram:
                             size_mb = meta.get("size_bytes", 0) / (1024 * 1024)
                             self.telegram.notify_s3_already_exists(s3_key=s3_key, size_mb=size_mb)
+
+                        # Создаём тикет если ещё нет
+                        if self.tracker.enabled and not meta.get("tracker_issue_key"):
+                            self.file_manager.update_metadata(file_key, {"stage": "tracker_creating"})
+                            presigned_url = self.s3_uploader.generate_presigned_url(
+                                s3_key=s3_key,
+                                expiration=self.s3_presigned_url_expiry
+                            )
+                            if presigned_url:
+                                from src.tracker_client import TrackerClient
+                                summary = TrackerClient.build_summary_from_s3_key(s3_key)
+                                issue = self.tracker.create_issue(
+                                    summary=summary,
+                                    description=presigned_url,
+                                    transcribe_conversation=self.transcribe_conversation
+                                )
+                                if issue:
+                                    issue_key = issue.get('key')
+                                    issue_url = issue.get('self')
+                                    self.logger.info(f"      → Задача создана: {issue_key}")
+                                    self.file_manager.update_metadata(file_key, {
+                                        "stage": "completed",
+                                        "tracker_issue_key": issue_key,
+                                        "tracker_url": issue_url
+                                    })
+                                    if self.telegram:
+                                        self.telegram.notify_tracker_issue_created(
+                                            issue_key=issue_key,
+                                            s3_key=s3_key,
+                                            issue_url=issue_url
+                                        )
                     else:
                         # Загружаем
                         s3_success = self.s3_uploader.upload_file(
@@ -506,6 +509,37 @@ class TranscriptionPipeline:
                                     s3_key=s3_key,
                                     size_mb=size_mb
                                 )
+
+                            # Сразу создаём тикет после загрузки в S3
+                            if self.tracker.enabled:
+                                self.file_manager.update_metadata(file_key, {"stage": "tracker_creating"})
+                                presigned_url = self.s3_uploader.generate_presigned_url(
+                                    s3_key=s3_key,
+                                    expiration=self.s3_presigned_url_expiry
+                                )
+                                if presigned_url:
+                                    from src.tracker_client import TrackerClient
+                                    summary = TrackerClient.build_summary_from_s3_key(s3_key)
+                                    issue = self.tracker.create_issue(
+                                        summary=summary,
+                                        description=presigned_url,
+                                        transcribe_conversation=self.transcribe_conversation
+                                    )
+                                    if issue:
+                                        issue_key = issue.get('key')
+                                        issue_url = issue.get('self')
+                                        self.logger.info(f"      → Задача создана: {issue_key}")
+                                        self.file_manager.update_metadata(file_key, {
+                                            "stage": "completed",
+                                            "tracker_issue_key": issue_key,
+                                            "tracker_url": issue_url
+                                        })
+                                        if self.telegram:
+                                            self.telegram.notify_tracker_issue_created(
+                                                issue_key=issue_key,
+                                                s3_key=s3_key,
+                                                issue_url=issue_url
+                                            )
                         else:
                             self.logger.error(f"      → Ошибка загрузки в S3")
                 else:
@@ -663,6 +697,9 @@ class TranscriptionPipeline:
 
 def monitor_mode(args):
     """Режим непрерывного мониторинга USB устройств"""
+    import threading
+    import time
+
     logger = logging.getLogger("monitor_mode")
     logger.info("Запуск режима мониторинга USB устройств...")
 
@@ -691,6 +728,25 @@ def monitor_mode(args):
     )
 
     usb_monitor = USBMonitor(check_interval=args.check_interval)
+
+    # Периодическая проверка recovery каждые 15 секунд
+    recovery_stop_event = threading.Event()
+
+    def recovery_check_loop():
+        """Периодическая проверка незавершённых задач"""
+        while not recovery_stop_event.is_set():
+            try:
+                incomplete_tasks = pipeline.file_manager.recover_incomplete_tasks()
+                if incomplete_tasks:
+                    logger.info(f"\n🔄 Recovery: найдено {len(incomplete_tasks)} незавершённых задач")
+                    pipeline.process_incomplete_tasks(incomplete_tasks)
+            except Exception as e:
+                logger.error(f"Ошибка recovery: {e}")
+            recovery_stop_event.wait(15)  # Ждём 15 секунд
+
+    recovery_thread = threading.Thread(target=recovery_check_loop, daemon=True)
+    recovery_thread.start()
+    logger.info("✅ Recovery проверка запущена (каждые 15 сек)")
 
     def on_device_connected(device_path):
         """Обработчик подключения нового устройства"""

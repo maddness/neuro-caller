@@ -114,21 +114,16 @@ class TrackerClient:
         Формирование summary из S3 ключа
 
         Args:
-            s3_key: Ключ файла в S3 (например: "2025-11-21/PERU_000/R20251121-174442.wav")
+            s3_key: Ключ файла в S3 (например: "2025-11-26/PERU_000/R20251126-174442.wav")
 
         Returns:
-            Форматированный summary (например: "2025_11_21/PERU_000/R20251121-174442")
+            Форматированный summary (например: "2025-11-26/PERU_000/R20251126-174442")
         """
         # Убираем расширение файла
         if "." in s3_key:
             s3_key = s3_key.rsplit(".", 1)[0]
 
-        # Заменяем дефисы на подчеркивания в дате (первый сегмент)
-        parts = s3_key.split("/")
-        if parts and "-" in parts[0]:
-            parts[0] = parts[0].replace("-", "_")
-
-        return "/".join(parts)
+        return s3_key
 
 
 if __name__ == "__main__":

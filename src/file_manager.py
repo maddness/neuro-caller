@@ -129,16 +129,16 @@ class FileManager:
             filename: Имя файла
 
         Returns:
-            Дата в формате YYYY_MM_DD или текущая дата если парсинг не удался
+            Дата в формате YYYY-MM-DD или текущая дата если парсинг не удался
         """
         # Паттерн: R + 8 цифр (YYYYMMDD) + - + 6 цифр (HHMMSS)
         match = re.match(r'R(\d{4})(\d{2})(\d{2})-\d{6}', filename)
         if match:
             year, month, day = match.groups()
-            return f"{year}_{month}_{day}"
+            return f"{year}-{month}-{day}"
 
         # Fallback на текущую дату
-        return datetime.now().strftime("%Y_%m_%d")
+        return datetime.now().strftime("%Y-%m-%d")
 
     def find_audio_files(self, device_path: str) -> List[Path]:
         """
@@ -196,8 +196,15 @@ class FileManager:
         """
         filename = file_path.name
 
+        # Формируем ключ файла: device_filename
+        file_key = f"{device_name}_{filename}"
+
+        # Проверяем по ключу напрямую (быстро и надёжно)
+        if file_key in self.processed_files:
+            return True
+
+        # Fallback: проверяем по device + filename в метаданных
         for file_info in self.processed_files.values():
-            # Проверяем: то же устройство + то же имя файла
             if (file_info.get("device") == device_name and
                 Path(file_info.get("original_path", "")).name == filename):
                 return True
@@ -302,11 +309,10 @@ class FileManager:
 
             # ЭТАП 2: Загружаем в S3 (если включено)
             if self.s3_uploader:
-                # Формируем S3 ключ: YYYY_MM_DD/device_name/original_filename
-                # ВАЖНО: Используем оригинальное имя файла БЕЗ суффиксов (_1, _2 и т.д.)
-                # Дата извлекается из имени файла (R20251124-120931.WAV → 2025_11_24)
-                date_underscored = self.extract_date_from_filename(source_path.name)
-                s3_key = f"{date_underscored}/{device_folder}/{source_path.name}"
+                # Формируем S3 ключ: YYYY-MM-DD/device_name/original_filename
+                # Дата извлекается из имени файла (R20251124-120931.WAV → 2025-11-24)
+                date_folder = self.extract_date_from_filename(source_path.name)
+                s3_key = f"{date_folder}/{device_folder}/{source_path.name}"
 
                 # STAGE: s3_uploading - перед проверкой/загрузкой
                 if file_key:
@@ -396,7 +402,8 @@ class FileManager:
         if self.telegram_notifier:
             self.telegram_notifier.notify_copying_started(
                 files_count=len(new_files),
-                total_size_mb=total_size_mb_estimate
+                total_size_mb=total_size_mb_estimate,
+                device_path=device_path
             )
 
         copied_files = []

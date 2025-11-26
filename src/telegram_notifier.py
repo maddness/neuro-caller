@@ -118,19 +118,22 @@ class TelegramNotifier:
 
         self.send_message_sync(text)
 
-    def notify_copying_started(self, files_count: int, total_size_mb: float):
+    def notify_copying_started(self, files_count: int, total_size_mb: float, device_path: str = None):
         """
         Уведомление о начале копирования файлов
 
         Args:
             files_count: Количество файлов
             total_size_mb: Общий размер в MB
+            device_path: Путь к устройству
         """
-        text = (
-            f"📦 <b>Начинаю копирование</b>\n\n"
-            f"📁 Файлов: <b>{files_count}</b>\n"
-            f"💾 Размер: <b>{total_size_mb:.1f} MB</b>"
-        )
+        text = f"📦 <b>Начинаю копирование</b>\n\n"
+
+        if device_path:
+            text += f"📍 Путь: <code>{device_path}</code>\n"
+
+        text += f"📁 Файлов: <b>{files_count}</b>\n"
+        text += f"💾 Размер: <b>{total_size_mb:.1f} MB</b>"
 
         self.send_message_sync(text)
 
@@ -156,20 +159,16 @@ class TelegramNotifier:
 
         self.send_message_sync(text)
 
-    def notify_copying_complete(self, files_count: int, total_size_mb: float, device_name: str = None):
+    def notify_copying_complete(self, files_count: int, device_name: str = None):
         """
         Уведомление об окончании копирования
 
         Args:
             files_count: Количество скопированных файлов
-            total_size_mb: Общий размер
             device_name: Имя устройства (опционально)
         """
-        text = (
-            f"✅ <b>ВСЕ ФАЙЛЫ СКОПИРОВАНЫ!</b>\n\n"
-            f"📁 Скопировано: <b>{files_count}</b> файлов\n"
-            f"💾 Размер: <b>{total_size_mb:.1f} MB</b>\n"
-        )
+        text = f"✅ <b>ВСЕ ФАЙЛЫ СКОПИРОВАНЫ!</b>\n\n"
+        text += f"📁 Скопировано: <b>{files_count}</b> файлов\n"
 
         if device_name:
             text += f"🆔 Устройство: <code>{device_name}</code>\n"
