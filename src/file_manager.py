@@ -21,7 +21,7 @@ class FileManager:
     """Управление аудиофайлами: обнаружение и копирование"""
 
     # Поддерживаемые аудио форматы
-    AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.wma', '.opus'}
+    AUDIO_EXTENSIONS = {'.wav', '.m4a', '.ogg'}
 
     def __init__(
         self,
@@ -172,11 +172,11 @@ class FileManager:
 
                 file_path = records_path / file
 
-                # Проверяем что это файл (не директория) и расширение .wav
-                if file_path.is_file() and file_path.suffix.lower() == '.wav':
+                # Проверяем что это файл (не директория) и расширение поддерживается
+                if file_path.is_file() and file_path.suffix.lower() in self.AUDIO_EXTENSIONS:
                     audio_files.append(file_path)
 
-            logger.info(f"Найдено {len(audio_files)} WAV файлов в RECORD на {device_path}")
+            logger.info(f"Найдено {len(audio_files)} аудио файлов в RECORD на {device_path}")
 
         except Exception as e:
             logger.error(f"Ошибка поиска файлов на {device_path}: {e}")
