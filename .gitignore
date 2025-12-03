@@ -15,6 +15,7 @@ test_audio/
 
 # Environment
 .env
+.env_peru
 
 # Logs
 *.log
