@@ -96,6 +96,13 @@ class TelegramNotifier:
     # Уведомления о различных этапах
     # ========================================================================
 
+    def notify_process_started(self, hostname: str = None):
+        """Уведомление о запуске процесса мониторинга"""
+        import socket
+        hostname = hostname or socket.gethostname()
+        text = f"🚀 <b>Мониторинг запущен</b>\n\n💻 Компьютер: <code>{hostname}</code>\nОжидаю подключения USB диктофонов..."
+        self.send_message_sync(text)
+
     def notify_device_connected(self, device_path: str, device_id: str, label: str = None):
         """
         Уведомление о подключении устройства

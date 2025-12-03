@@ -748,6 +748,9 @@ def monitor_mode(args):
     recovery_thread.start()
     logger.info("✅ Recovery проверка запущена (каждые 15 сек)")
 
+    # Уведомление о запуске
+    pipeline.telegram.notify_process_started()
+
     def on_device_connected(device_path):
         """Обработчик подключения нового устройства"""
         logger.info(f"\n🔌 Новое устройство подключено: {device_path}")
