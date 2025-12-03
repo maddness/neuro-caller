@@ -1,3 +1,5 @@
+<!-- https://wiki.yandex-team.ru/users/aostrikov/4f5793609f20/ -->
+
 ### Quick Setup
 
 #### 1. Open Terminal
