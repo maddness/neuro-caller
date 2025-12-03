@@ -763,6 +763,13 @@ def monitor_mode(args):
         if device_info['uuid']:
             logger.info(f"   UUID: {device_info['uuid'][:16]}...")
 
+        # Уведомление о подключении
+        pipeline.telegram.notify_device_connected(
+            device_path=device_path,
+            device_id=device_info['unique_id'],
+            label=device_info.get('label')
+        )
+
         # Проверяем, есть ли аудио файлы
         if not USBMonitor.is_audio_recorder(device_path):
             logger.info("⚠️  Аудио файлы не найдены, пропускаем")
@@ -776,8 +783,13 @@ def monitor_mode(args):
         except Exception as e:
             logger.error(f"Ошибка обработки устройства: {e}", exc_info=True)
 
+    def on_device_disconnected(device_path):
+        """Обработчик отключения устройства"""
+        logger.info(f"\n⏏️ Устройство отключено: {device_path}")
+        pipeline.telegram.notify_device_disconnected(device_path)
+
     # Запускаем мониторинг
-    usb_monitor.monitor(callback=on_device_connected)
+    usb_monitor.monitor(callback=on_device_connected, on_disconnect=on_device_disconnected)
 
 
 def process_mode(args):

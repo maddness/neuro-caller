@@ -112,17 +112,31 @@ class TelegramNotifier:
             device_id: Уникальный ID устройства
             label: Метка устройства
         """
-        device_name = label if label else device_id
+        import socket
+        hostname = socket.gethostname()
 
         text = (
             f"🔌 <b>Устройство подключено</b>\n\n"
-            f"📍 Путь: <code>{device_path}</code>\n"
-            f"🆔 ID: <code>{device_id}</code>\n"
+            f"💻 Компьютер: <code>{hostname}</code>\n"
+            f"📍 Путь: <code>{device_path}</code>"
         )
 
-        if label:
-            text += f"🏷 Метка: <b>{label}</b>\n"
+        self.send_message_sync(text)
 
+    def notify_device_disconnected(self, device_path: str):
+        """
+        Уведомление об отключении устройства
+
+        Args:
+            device_path: Путь к устройству
+        """
+        import socket
+        hostname = socket.gethostname()
+        text = (
+            f"⏏️ <b>Устройство отключено</b>\n\n"
+            f"💻 Компьютер: <code>{hostname}</code>\n"
+            f"📍 Путь: <code>{device_path}</code>"
+        )
         self.send_message_sync(text)
 
     def notify_copying_started(self, files_count: int, total_size_mb: float, device_path: str = None):

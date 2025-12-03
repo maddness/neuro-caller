@@ -96,13 +96,32 @@ class USBMonitor:
 
         return new_devices
 
-    def monitor(self, callback=None):
+    def detect_disconnected_devices(self) -> List[str]:
+        """
+        Обнаружение отключенных устройств
+
+        Returns:
+            Список путей к отключенным устройствам
+        """
+        current_devices = set(self.get_mounted_devices())
+        disconnected = list(self.known_devices - current_devices)
+
+        if disconnected:
+            logger.info(f"Обнаружено отключенных устройств: {len(disconnected)}")
+            for device in disconnected:
+                logger.info(f"  - {device}")
+
+        return disconnected
+
+    def monitor(self, callback=None, on_disconnect=None):
         """
         Непрерывный мониторинг USB устройств
 
         Args:
             callback: Функция обратного вызова для обработки новых устройств
                      Сигнатура: callback(device_path: str)
+            on_disconnect: Функция обратного вызова при отключении устройства
+                     Сигнатура: on_disconnect(device_path: str)
         """
         logger.info("Запуск мониторинга USB устройств...")
         logger.info(f"Интервал проверки: {self.check_interval} сек")
@@ -112,17 +131,36 @@ class USBMonitor:
 
         try:
             while True:
-                new_devices = self.detect_new_devices()
+                # Сначала проверяем отключенные устройства
+                current_devices = set(self.get_mounted_devices())
+                disconnected = list(self.known_devices - current_devices)
+
+                if disconnected and on_disconnect:
+                    for device in disconnected:
+                        logger.info(f"⏏️ Устройство отключено: {device}")
+                        try:
+                            on_disconnect(device)
+                        except Exception as e:
+                            logger.error(f"Ошибка обработки отключения {device}: {e}")
+
+                # Обновляем known_devices после проверки отключений
+                new_devices = list(current_devices - self.known_devices)
+                if new_devices:
+                    logger.info(f"Обнаружено новых устройств: {len(new_devices)}")
+                    for device in new_devices:
+                        logger.info(f"  - {device}")
+
+                self.known_devices = current_devices
 
                 # Устройства для обработки
                 devices_to_process = []
 
                 # При первом запуске обрабатываем все уже подключенные устройства
                 if first_run:
-                    current_devices = list(self.known_devices)
-                    if current_devices:
-                        logger.info(f"Первый запуск: проверка {len(current_devices)} уже подключенных устройств...")
-                        devices_to_process.extend(current_devices)
+                    current_list = list(self.known_devices)
+                    if current_list:
+                        logger.info(f"Первый запуск: проверка {len(current_list)} уже подключенных устройств...")
+                        devices_to_process.extend(current_list)
                     first_run = False
 
                 # Добавляем новые устройства
