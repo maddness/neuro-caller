@@ -1,39 +1,48 @@
 """
 S3 Uploader Module
 
-Модуль для загрузки файлов в S3-совместимые хранилища
-(Yandex Object Storage, AWS S3, MinIO и др.)
+Module for uploading files to S3-compatible storage
+(Yandex Object Storage, AWS S3, MinIO, etc.)
 
-Основные возможности:
-- Загрузка файлов в S3
-- Проверка существования файлов
-- Генерация временных ссылок для скачивания (presigned URLs)
-- Retry при ошибках
-- Подробное логирование
+Features:
+- File upload to S3
+- File existence check
+- Temporary download links (presigned URLs)
+- Retry on errors
+- Detailed logging
 """
 
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError, BotoCoreError
+from botocore.exceptions import (
+    ClientError,
+    BotoCoreError,
+    ConnectTimeoutError,
+    ReadTimeoutError,
+    EndpointConnectionError
+)
 
 logger = logging.getLogger(__name__)
 
 
 class S3Uploader:
     """
-    Класс для загрузки файлов в S3-совместимое хранилище
+    Class for uploading files to S3-compatible storage
 
-    Поддерживает:
+    Supports:
     - Yandex Object Storage
     - AWS S3
     - MinIO
-    - Другие S3-совместимые хранилища
+    - Other S3-compatible storages
     """
+
+    # Short connect timeout for quick failure detection (hardcoded)
+    CONNECT_TIMEOUT = 10
 
     def __init__(
         self,
@@ -46,29 +55,30 @@ class S3Uploader:
         timeout: int = 300
     ):
         """
-        Инициализация S3 клиента
+        Initialize S3 client
 
         Args:
-            endpoint_url: URL S3 endpoint (например https://storage.yandexcloud.net)
-            access_key_id: Access Key ID для аутентификации
-            secret_access_key: Secret Access Key для аутентификации
-            bucket_name: Имя бакета для хранения файлов
-            region_name: Регион (для Yandex обычно ru-central1)
-            retry_attempts: Количество повторных попыток при ошибке
-            timeout: Таймаут операций в секундах
+            endpoint_url: S3 endpoint URL (e.g., https://storage.yandexcloud.net)
+            access_key_id: Access Key ID for authentication
+            secret_access_key: Secret Access Key for authentication
+            bucket_name: Bucket name for file storage
+            region_name: Region (for Yandex usually ru-central1)
+            retry_attempts: Number of retry attempts on error
+            timeout: Read timeout in seconds (for large file uploads)
         """
         self.endpoint_url = endpoint_url
         self.bucket_name = bucket_name
-        self.retry_attempts = retry_attempts
 
-        # Конфигурация с retry и таймаутом
+        # Configuration without boto3 retry - we handle retry via recovery mechanism
+        # connect_timeout is short (10s) for quick failure detection
+        # read_timeout is longer for large file uploads
         config = Config(
-            retries={'max_attempts': retry_attempts, 'mode': 'standard'},
-            connect_timeout=timeout,
+            retries={'max_attempts': 0},
+            connect_timeout=self.CONNECT_TIMEOUT,
             read_timeout=timeout
         )
 
-        # Создаем S3 клиент
+        # Create S3 client
         try:
             self.s3_client = boto3.client(
                 service_name='s3',
@@ -80,36 +90,43 @@ class S3Uploader:
             )
 
             logger.info(
-                f"S3 клиент инициализирован: {endpoint_url}, "
-                f"бакет: {bucket_name}, retry: {retry_attempts}"
+                f"S3 client initialized: {endpoint_url}, "
+                f"bucket: {bucket_name}, "
+                f"connect_timeout: {self.CONNECT_TIMEOUT}s, read_timeout: {timeout}s"
             )
 
-            # Проверяем доступ к бакету
+            # Verify bucket access
             self._verify_bucket_access()
 
+        except (ConnectTimeoutError, EndpointConnectionError) as e:
+            logger.error(f"S3 connection timeout: {e}")
+            raise
         except (ClientError, BotoCoreError) as e:
-            logger.error(f"Ошибка инициализации S3 клиента: {e}")
+            logger.error(f"S3 client initialization error: {e}")
             raise
 
     def _verify_bucket_access(self) -> bool:
         """
-        Проверка доступа к бакету
+        Verify bucket access
 
         Returns:
-            True если доступ есть
+            True if access is available
         """
         try:
             self.s3_client.head_bucket(Bucket=self.bucket_name)
-            logger.info(f"✓ Доступ к бакету {self.bucket_name} подтвержден")
+            logger.info(f"Bucket {self.bucket_name} access confirmed")
             return True
+        except (ConnectTimeoutError, EndpointConnectionError) as e:
+            logger.error(f"S3 connection timeout during bucket check: {e}")
+            return False
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
             if error_code == '404':
-                logger.error(f"✗ Бакет {self.bucket_name} не найден")
+                logger.error(f"Bucket {self.bucket_name} not found")
             elif error_code == '403':
-                logger.error(f"✗ Нет доступа к бакету {self.bucket_name}")
+                logger.error(f"No access to bucket {self.bucket_name}")
             else:
-                logger.error(f"✗ Ошибка доступа к бакету: {e}")
+                logger.error(f"Bucket access error: {e}")
             return False
 
     def upload_file(
@@ -119,49 +136,49 @@ class S3Uploader:
         storage_class: str = "STANDARD",
         acl: str = "private",
         metadata: Optional[Dict[str, str]] = None
-    ) -> bool:
+    ) -> Tuple[bool, Optional[str]]:
         """
-        Загрузка файла в S3
+        Upload file to S3
 
         Args:
-            file_path: Путь к локальному файлу
-            s3_key: Ключ (путь) в S3 (например: 2025_11_20/PERU_003/file.wav)
-            storage_class: Класс хранилища (STANDARD, COLD, ICE)
+            file_path: Path to local file
+            s3_key: Key (path) in S3 (e.g., 2025_11_20/PERU_003/file.wav)
+            storage_class: Storage class (STANDARD, COLD, ICE)
             acl: Access Control List (private, public-read, etc)
-            metadata: Дополнительные метаданные для файла
+            metadata: Additional file metadata
 
         Returns:
-            True если загрузка успешна, False при ошибке
+            Tuple of (success: bool, error_message: Optional[str])
         """
         if not file_path.exists():
-            logger.error(f"✗ Файл не найден: {file_path}")
-            return False
+            logger.error(f"File not found: {file_path}")
+            return False, "File not found"
 
-        # Размер файла для логирования
+        # File size for logging
         file_size = file_path.stat().st_size
         file_size_mb = file_size / (1024 * 1024)
 
-        # Формируем параметры загрузки
+        # Build upload parameters
         extra_args = {
             'StorageClass': storage_class,
             'ACL': acl
         }
 
-        # Добавляем метаданные если есть
+        # Add metadata if provided
         if metadata:
             extra_args['Metadata'] = metadata
 
-        # Определяем Content-Type для WAV файлов
+        # Set Content-Type for WAV files
         if file_path.suffix.lower() in ['.wav', '.wave']:
             extra_args['ContentType'] = 'audio/wav'
 
         try:
             logger.info(
-                f"Загрузка в S3: {file_path.name} ({file_size_mb:.1f} MB) "
+                f"Uploading to S3: {file_path.name} ({file_size_mb:.1f} MB) "
                 f"-> s3://{self.bucket_name}/{s3_key}"
             )
 
-            # Загружаем файл
+            # Upload file
             self.s3_client.upload_file(
                 str(file_path),
                 self.bucket_name,
@@ -169,38 +186,64 @@ class S3Uploader:
                 ExtraArgs=extra_args
             )
 
-            logger.info(f"✓ Файл загружен в S3: {s3_key}")
-            return True
+            logger.info(f"File uploaded to S3: {s3_key}")
+            return True, None
 
+        except ConnectTimeoutError as e:
+            error_msg = "Connection timeout"
+            logger.error(f"S3 connection timeout: {e}")
+            return False, error_msg
+        except ReadTimeoutError as e:
+            error_msg = "Read timeout (file too large or slow connection)"
+            logger.error(f"S3 read timeout: {e}")
+            return False, error_msg
+        except EndpointConnectionError as e:
+            error_msg = "Cannot connect to S3"
+            logger.error(f"S3 endpoint connection error: {e}")
+            return False, error_msg
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-            logger.error(
-                f"✗ Ошибка загрузки в S3 (код {error_code}): {e}"
-            )
-            return False
+            error_msg = f"S3 error: {error_code}"
+            logger.error(f"S3 upload error (code {error_code}): {e}")
+            return False, error_msg
+        except BotoCoreError as e:
+            error_msg = "Network error"
+            logger.error(f"S3 network error: {e}")
+            return False, error_msg
         except Exception as e:
-            logger.error(f"✗ Неожиданная ошибка при загрузке: {e}")
-            return False
+            error_msg = str(e)
+            logger.error(f"Unexpected upload error: {e}")
+            return False, error_msg
 
-    def file_exists(self, s3_key: str) -> bool:
+    def file_exists(self, s3_key: str) -> Tuple[bool, Optional[str]]:
         """
-        Проверка существования файла в S3
+        Check if file exists in S3
 
         Args:
-            s3_key: Ключ файла в S3
+            s3_key: File key in S3
 
         Returns:
-            True если файл существует
+            Tuple of (exists: bool, error_message: Optional[str])
+            If error occurs, returns (False, error_message)
         """
         try:
             self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
-            return True
+            return True, None
+        except ConnectTimeoutError as e:
+            logger.error(f"S3 connection timeout checking file: {e}")
+            return False, "Connection timeout"
+        except EndpointConnectionError as e:
+            logger.error(f"S3 endpoint connection error: {e}")
+            return False, "Cannot connect to S3"
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
             if error_code == '404':
-                return False
-            logger.error(f"✗ Ошибка проверки существования файла: {e}")
-            return False
+                return False, None  # File doesn't exist, not an error
+            logger.error(f"S3 file check error: {e}")
+            return False, f"S3 error: {error_code}"
+        except BotoCoreError as e:
+            logger.error(f"S3 network error checking file: {e}")
+            return False, "Network error"
 
     def generate_presigned_url(
         self,
@@ -208,22 +251,17 @@ class S3Uploader:
         expiration: int = 604800
     ) -> Optional[str]:
         """
-        Генерация временной ссылки для скачивания файла (presigned URL)
+        Generate temporary download link (presigned URL)
 
         Args:
-            s3_key: Ключ файла в S3
-            expiration: Время жизни ссылки в секундах (по умолчанию 7 дней)
+            s3_key: File key in S3
+            expiration: URL lifetime in seconds (default 7 days)
 
         Returns:
-            Presigned URL или None при ошибке
+            Presigned URL or None on error
         """
         try:
-            # Проверяем существование файла
-            if not self.file_exists(s3_key):
-                logger.warning(f"⚠ Файл не найден в S3: {s3_key}")
-                return None
-
-            # Генерируем presigned URL
+            # Generate presigned URL (no file_exists check - file was just uploaded)
             url = self.s3_client.generate_presigned_url(
                 'get_object',
                 Params={
@@ -233,31 +271,34 @@ class S3Uploader:
                 ExpiresIn=expiration
             )
 
-            # Вычисляем дату истечения для логирования
+            # Calculate expiry date for logging
             expiry_date = datetime.now() + timedelta(seconds=expiration)
             logger.info(
-                f"✓ Presigned URL создан для {s3_key} "
-                f"(действителен до {expiry_date.strftime('%Y-%m-%d %H:%M')})"
+                f"Presigned URL created for {s3_key} "
+                f"(valid until {expiry_date.strftime('%Y-%m-%d %H:%M')})"
             )
 
             return url
 
+        except (ConnectTimeoutError, EndpointConnectionError) as e:
+            logger.error(f"S3 connection error generating URL: {e}")
+            return None
         except ClientError as e:
-            logger.error(f"✗ Ошибка генерации presigned URL: {e}")
+            logger.error(f"Error generating presigned URL: {e}")
             return None
         except Exception as e:
-            logger.error(f"✗ Неожиданная ошибка при генерации URL: {e}")
+            logger.error(f"Unexpected error generating URL: {e}")
             return None
 
     def get_file_info(self, s3_key: str) -> Optional[Dict[str, Any]]:
         """
-        Получение информации о файле в S3
+        Get file info from S3
 
         Args:
-            s3_key: Ключ файла в S3
+            s3_key: File key in S3
 
         Returns:
-            Словарь с информацией о файле или None
+            Dictionary with file info or None
         """
         try:
             response = self.s3_client.head_object(
@@ -273,38 +314,38 @@ class S3Uploader:
             }
 
         except ClientError as e:
-            logger.error(f"✗ Ошибка получения информации о файле: {e}")
+            logger.error(f"Error getting file info: {e}")
             return None
 
     def delete_file(self, s3_key: str) -> bool:
         """
-        Удаление файла из S3
+        Delete file from S3
 
         Args:
-            s3_key: Ключ файла в S3
+            s3_key: File key in S3
 
         Returns:
-            True если удаление успешно
+            True if deletion successful
         """
         try:
-            logger.info(f"Удаление из S3: {s3_key}")
+            logger.info(f"Deleting from S3: {s3_key}")
             self.s3_client.delete_object(Bucket=self.bucket_name, Key=s3_key)
-            logger.info(f"✓ Файл удален из S3: {s3_key}")
+            logger.info(f"File deleted from S3: {s3_key}")
             return True
         except ClientError as e:
-            logger.error(f"✗ Ошибка удаления файла: {e}")
+            logger.error(f"Error deleting file: {e}")
             return False
 
     def list_files(self, prefix: str = "", max_keys: int = 1000) -> list:
         """
-        Получение списка файлов в бакете
+        Get list of files in bucket
 
         Args:
-            prefix: Префикс для фильтрации (например "2025_11_20/")
-            max_keys: Максимальное количество файлов
+            prefix: Prefix for filtering (e.g., "2025_11_20/")
+            max_keys: Maximum number of files
 
         Returns:
-            Список ключей файлов
+            List of file keys
         """
         try:
             response = self.s3_client.list_objects_v2(
@@ -317,71 +358,64 @@ class S3Uploader:
                 return []
 
             files = [obj['Key'] for obj in response['Contents']]
-            logger.info(f"Найдено файлов в S3: {len(files)} (префикс: {prefix or 'все'})")
+            logger.info(f"Found files in S3: {len(files)} (prefix: {prefix or 'all'})")
             return files
 
         except ClientError as e:
-            logger.error(f"✗ Ошибка получения списка файлов: {e}")
+            logger.error(f"Error listing files: {e}")
             return []
 
 
-# Пример использования
+# Usage example
 if __name__ == "__main__":
     import os
     from dotenv import load_dotenv
 
-    # Настройка логирования
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    # Загружаем переменные окружения
     load_dotenv()
 
-    # Проверяем что все переменные установлены
     if not all([
         os.getenv("S3_ENDPOINT_URL"),
         os.getenv("S3_ACCESS_KEY_ID"),
         os.getenv("S3_SECRET_ACCESS_KEY"),
         os.getenv("S3_BUCKET_NAME")
     ]):
-        logger.error("Не все S3 переменные установлены в .env")
+        logger.error("Not all S3 variables set in .env")
         exit(1)
 
-    # Создаем S3 uploader
     uploader = S3Uploader(
         endpoint_url=os.getenv("S3_ENDPOINT_URL"),
         access_key_id=os.getenv("S3_ACCESS_KEY_ID"),
         secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY"),
         bucket_name=os.getenv("S3_BUCKET_NAME"),
         region_name=os.getenv("S3_REGION_NAME", "ru-central1"),
-        retry_attempts=int(os.getenv("S3_RETRY_ATTEMPTS", "3"))
+        retry_attempts=int(os.getenv("S3_RETRY_ATTEMPTS", "3")),
+        timeout=int(os.getenv("S3_UPLOAD_TIMEOUT", "300"))
     )
 
-    # Пример: загрузка тестового файла
     test_file = Path("test.wav")
     if test_file.exists():
         s3_key = "2025_11_20/TEST_DEVICE/test.wav"
 
-        # Метаданные
         metadata = {
             'device': 'TEST_DEVICE',
             'original_filename': test_file.name,
             'upload_date': datetime.now().isoformat()
         }
 
-        # Загружаем
-        success = uploader.upload_file(
+        success, error = uploader.upload_file(
             file_path=test_file,
             s3_key=s3_key,
             metadata=metadata
         )
 
         if success:
-            # Генерируем ссылку на скачивание
             url = uploader.generate_presigned_url(s3_key, expiration=604800)
             if url:
-                logger.info(f"Ссылка для скачивания: {url}")
+                logger.info(f"Download link: {url}")
     else:
-        logger.info("Тестовый файл не найден. Пропускаем пример.")
+        logger.info("Test file not found. Skipping example.")

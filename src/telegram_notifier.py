@@ -1,6 +1,6 @@
 """
-Telegram уведомления о процессе обработки
-Отправляет сообщения в Telegram о всех этапах работы
+Telegram notifications for the processing pipeline
+Sends messages to Telegram about all processing stages
 """
 
 import logging
@@ -14,23 +14,23 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramNotifier:
-    """Отправка уведомлений в Telegram о процессе обработки"""
+    """Send Telegram notifications about the processing pipeline"""
 
     def __init__(self, bot_token: str = None, chat_id: str = None, enabled: bool = True):
         """
         Args:
-            bot_token: Токен Telegram бота
-            chat_id: ID чата для отправки сообщений
-            enabled: Включены ли уведомления
+            bot_token: Telegram bot token
+            chat_id: Chat ID for sending messages
+            enabled: Whether notifications are enabled
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.enabled = enabled and bot_token and chat_id
 
         if self.enabled:
-            logger.info("✅ Telegram бот инициализирован")
+            logger.info("Telegram bot initialized")
         else:
-            logger.info("ℹ️  Telegram уведомления отключены")
+            logger.info("Telegram notifications disabled")
 
     async def _send_message(
         self,
@@ -39,19 +39,18 @@ class TelegramNotifier:
         reply_markup: InlineKeyboardMarkup = None
     ):
         """
-        Отправка сообщения в Telegram
+        Send message to Telegram
 
         Args:
-            text: Текст сообщения
-            parse_mode: Режим парсинга (HTML, Markdown)
-            reply_markup: Inline клавиатура с кнопками
+            text: Message text
+            parse_mode: Parse mode (HTML, Markdown)
+            reply_markup: Inline keyboard with buttons
         """
         if not self.enabled:
             return
 
         bot = None
         try:
-            # Создаем бота для каждой отправки (чтобы избежать проблем с закрытым event loop)
             bot = Bot(token=self.bot_token)
             await bot.send_message(
                 chat_id=self.chat_id,
@@ -60,11 +59,10 @@ class TelegramNotifier:
                 reply_markup=reply_markup,
                 disable_notification=False
             )
-            logger.debug(f"Telegram сообщение отправлено: {text[:50]}...")
+            logger.debug(f"Telegram message sent: {text[:50]}...")
         except Exception as e:
-            logger.error(f"Ошибка отправки Telegram сообщения: {e}")
+            logger.error(f"Error sending Telegram message: {e}")
         finally:
-            # Закрываем сессию бота
             if bot:
                 await bot.session.close()
 
@@ -75,101 +73,100 @@ class TelegramNotifier:
         reply_markup: InlineKeyboardMarkup = None
     ):
         """
-        Синхронная отправка сообщения (для использования в обычном коде)
+        Synchronous message sending (for use in regular code)
 
         Args:
-            text: Текст сообщения
-            parse_mode: Режим парсинга
-            reply_markup: Inline клавиатура с кнопками
+            text: Message text
+            parse_mode: Parse mode
+            reply_markup: Inline keyboard with buttons
         """
         if not self.enabled:
             return
 
         try:
-            # asyncio.run() создает новый event loop для каждого вызова
-            # Это работает в потоках ThreadPoolExecutor
             asyncio.run(self._send_message(text, parse_mode, reply_markup))
         except Exception as e:
-            logger.error(f"Ошибка синхронной отправки сообщения: {e}")
+            logger.error(f"Error sending sync message: {e}")
 
     # ========================================================================
-    # Уведомления о различных этапах
+    # Notifications for various stages
     # ========================================================================
 
-    def notify_process_started(self, hostname: str = None):
-        """Уведомление о запуске процесса мониторинга"""
+    def notify_process_started(self, hostname: str = None, version: str = None):
+        """Notification about monitoring process start"""
         import socket
         hostname = hostname or socket.gethostname()
-        text = f"🚀 <b>Мониторинг запущен</b>\n\n💻 Компьютер: <code>{hostname}</code>\nОжидаю подключения USB диктофонов..."
+        version_str = f" v{version}" if version else ""
+        text = f"🚀 <b>Monitoring started{version_str}</b>\n\n💻 Computer: <code>{hostname}</code>\nWaiting for USB recorders..."
         self.send_message_sync(text)
 
     def notify_device_connected(self, device_path: str, device_id: str, label: str = None):
         """
-        Уведомление о подключении устройства
+        Notification about device connection
 
         Args:
-            device_path: Путь к устройству
-            device_id: Уникальный ID устройства
-            label: Метка устройства
+            device_path: Path to device
+            device_id: Unique device ID
+            label: Device label
         """
         import socket
         hostname = socket.gethostname()
 
         text = (
-            f"🔌 <b>Устройство подключено</b>\n\n"
-            f"💻 Компьютер: <code>{hostname}</code>\n"
-            f"📍 Путь: <code>{device_path}</code>"
+            f"🔌 <b>Device connected</b>\n\n"
+            f"💻 Computer: <code>{hostname}</code>\n"
+            f"📍 Path: <code>{device_path}</code>"
         )
 
         self.send_message_sync(text)
 
     def notify_device_disconnected(self, device_path: str):
         """
-        Уведомление об отключении устройства
+        Notification about device disconnection
 
         Args:
-            device_path: Путь к устройству
+            device_path: Path to device
         """
         import socket
         hostname = socket.gethostname()
         text = (
-            f"⏏️ <b>Устройство отключено</b>\n\n"
-            f"💻 Компьютер: <code>{hostname}</code>\n"
-            f"📍 Путь: <code>{device_path}</code>"
+            f"⏏️ <b>Device disconnected</b>\n\n"
+            f"💻 Computer: <code>{hostname}</code>\n"
+            f"📍 Path: <code>{device_path}</code>"
         )
         self.send_message_sync(text)
 
     def notify_copying_started(self, files_count: int, total_size_mb: float, device_path: str = None):
         """
-        Уведомление о начале копирования файлов
+        Notification about copying start
 
         Args:
-            files_count: Количество файлов
-            total_size_mb: Общий размер в MB
-            device_path: Путь к устройству
+            files_count: Number of files
+            total_size_mb: Total size in MB
+            device_path: Path to device
         """
-        text = f"📦 <b>Начинаю копирование</b>\n\n"
+        text = f"📦 <b>Starting copy</b>\n\n"
 
         if device_path:
-            text += f"📍 Путь: <code>{device_path}</code>\n"
+            text += f"📍 Path: <code>{device_path}</code>\n"
 
-        text += f"📁 Файлов: <b>{files_count}</b>\n"
-        text += f"💾 Размер: <b>{total_size_mb:.1f} MB</b>"
+        text += f"📁 Files: <b>{files_count}</b>\n"
+        text += f"💾 Size: <b>{total_size_mb:.1f} MB</b>"
 
         self.send_message_sync(text)
 
     def notify_file_copied(self, file_num: int, total_files: int, filename: str, size_mb: float, device_path: str = None):
         """
-        Уведомление о копировании файла
+        Notification about file copying
 
         Args:
-            file_num: Номер файла
-            total_files: Всего файлов
-            filename: Имя файла
-            size_mb: Размер в MB
-            device_path: Полный путь к файлу на устройстве (опционально)
+            file_num: File number
+            total_files: Total files
+            filename: File name
+            size_mb: Size in MB
+            device_path: Full path to file on device (optional)
         """
-        text = f"📄 <b>[{file_num}/{total_files}]</b> Копирую...\n\n"
+        text = f"📄 <b>[{file_num}/{total_files}]</b> Copying...\n\n"
 
         if device_path:
             text += f"📍 <code>{device_path}</code>\n"
@@ -182,19 +179,19 @@ class TelegramNotifier:
 
     def notify_copying_complete(self, files_count: int, device_name: str = None):
         """
-        Уведомление об окончании копирования
+        Notification about copying completion
 
         Args:
-            files_count: Количество скопированных файлов
-            device_name: Имя устройства (опционально)
+            files_count: Number of copied files
+            device_name: Device name (optional)
         """
-        text = f"✅ <b>ВСЕ ФАЙЛЫ СКОПИРОВАНЫ!</b>\n\n"
-        text += f"📁 Скопировано: <b>{files_count}</b> файлов\n"
+        text = f"✅ <b>ALL FILES COPIED!</b>\n\n"
+        text += f"📁 Copied: <b>{files_count}</b> files\n"
 
         if device_name:
-            text += f"🆔 Устройство: <code>{device_name}</code>\n"
+            text += f"🆔 Device: <code>{device_name}</code>\n"
 
-        text += f"\n🔓 <b>Можно отключить диктофон</b>"
+        text += f"\n🔓 <b>You can disconnect the recorder</b>"
 
         self.send_message_sync(text)
 
@@ -207,31 +204,29 @@ class TelegramNotifier:
         expiry_days: int = 7
     ):
         """
-        Уведомление о загрузке файла в S3 Object Storage
+        Notification about S3 upload
 
         Args:
-            filename: Имя файла
-            s3_key: Ключ файла в S3 (путь в бакете)
-            size_mb: Размер файла в MB
-            presigned_url: Временная ссылка для скачивания (опционально)
-            expiry_days: Срок действия ссылки в днях (по умолчанию 7)
+            filename: File name
+            s3_key: S3 key (path in bucket)
+            size_mb: File size in MB
+            presigned_url: Temporary download link (optional)
+            expiry_days: Link expiry in days (default 7)
         """
         text = (
-            f"☁️ <b>Файл загружен в S3</b>\n\n"
+            f"☁️ <b>File uploaded to S3</b>\n\n"
             f"📍 <code>{s3_key}</code>\n"
-            f"💾 Размер: <b>{size_mb:.1f} MB</b>"
+            f"💾 Size: <b>{size_mb:.1f} MB</b>"
         )
 
-        # Добавляем информацию о сроке действия ссылки
         if presigned_url:
-            text += f"\n\n🔗 Ссылка действительна <b>{expiry_days} дней</b>"
+            text += f"\n\n🔗 Link valid for <b>{expiry_days} days</b>"
 
-        # Создаем inline кнопку для скачивания если есть URL
         reply_markup = None
         if presigned_url:
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="⬇️ Скачать из S3", url=presigned_url)]
+                    [InlineKeyboardButton(text="⬇️ Download from S3", url=presigned_url)]
                 ]
             )
             reply_markup = keyboard
@@ -240,73 +235,103 @@ class TelegramNotifier:
 
     def notify_s3_already_exists(self, s3_key: str, size_mb: float):
         """
-        Уведомление о том, что файл уже существует в S3
+        Notification that file already exists in S3
 
         Args:
-            s3_key: Ключ файла в S3 (полный путь)
-            size_mb: Размер файла в MB
+            s3_key: S3 key (full path)
+            size_mb: File size in MB
         """
         text = (
-            f"⏩ <b>Файл уже существует в S3</b>\n\n"
+            f"⏩ <b>File already exists in S3</b>\n\n"
             f"📍 <code>{s3_key}</code>\n"
-            f"💾 Размер: <b>{size_mb:.1f} MB</b>"
+            f"💾 Size: <b>{size_mb:.1f} MB</b>"
         )
 
         self.send_message_sync(text)
 
-    def notify_s3_upload_error(self, filename: str, error_message: str):
+    def notify_copy_error(self, filename: str, error_message: str):
         """
-        Уведомление об ошибке загрузки в S3
+        Notification about local copy error
 
         Args:
-            filename: Имя файла
-            error_message: Текст ошибки
+            filename: File name
+            error_message: Error text
+        """
+        import socket
+        hostname = socket.gethostname()
+        text = (
+            f"❌ <b>Copy error</b>\n\n"
+            f"💻 Computer: <code>{hostname}</code>\n"
+            f"📝 File: <code>{filename}</code>\n"
+            f"⚠️ Error: {error_message}"
+        )
+        self.send_message_sync(text)
+
+    def notify_s3_upload_error(self, filename: str, error_message: str):
+        """
+        Notification about S3 upload error
+
+        Args:
+            filename: File name
+            error_message: Error text
         """
         text = (
-            f"⚠️ <b>Ошибка загрузки в S3</b>\n\n"
-            f"📝 Файл: <code>{filename}</code>\n"
-            f"❌ Ошибка: {error_message}\n"
-            f"\n💡 Файл сохранен локально"
+            f"⚠️ <b>S3 upload error</b>\n\n"
+            f"📝 File: <code>{filename}</code>\n"
+            f"❌ Error: {error_message}\n"
+            f"\n💡 File saved locally"
         )
 
         self.send_message_sync(text)
 
     def notify_tracker_issue_created(self, issue_key: str, s3_key: str, issue_url: str = None):
         """
-        Уведомление о создании задачи в Яндекс Трекере
+        Notification about Yandex Tracker issue creation
 
         Args:
-            issue_key: Ключ задачи (например, PROJ-123)
-            s3_key: Ключ файла в S3 (полный путь)
-            issue_url: URL задачи в Трекере (опционально)
+            issue_key: Issue key (e.g., PROJ-123)
+            s3_key: S3 key (full path)
+            issue_url: Issue URL in Tracker (optional)
         """
-        # Формируем ссылку на задачу (если URL API, преобразуем в веб-ссылку)
         if issue_url:
-            # Преобразуем API URL в веб URL
-            # https://st-api.yandex-team.ru/v2/issues/MICBUDDY-56 -> https://st.yandex-team.ru/MICBUDDY-56
             web_url = f"https://st.yandex-team.ru/{issue_key}"
             task_link = f"<a href=\"{web_url}\">{issue_key}</a>"
         else:
             task_link = f"<code>{issue_key}</code>"
 
         text = (
-            f"📋 Задача {task_link} создана\n\n"
-            f"📝 Файл: <code>{s3_key}</code>"
+            f"📋 Issue {task_link} created\n\n"
+            f"📝 File: <code>{s3_key}</code>"
         )
 
         self.send_message_sync(text)
 
-    def notify_processing_started(self, files_count: int):
+    def notify_tracker_error(self, s3_key: str, error_message: str):
         """
-        Уведомление о начале обработки файлов
+        Notification about Tracker issue creation error
 
         Args:
-            files_count: Количество файлов для обработки
+            s3_key: S3 key (full path)
+            error_message: Error text
         """
         text = (
-            f"🔄 <b>Начинаю обработку</b>\n\n"
-            f"📊 Файлов к обработке: <b>{files_count}</b>\n"
-            f"⚙️ Транскрибация с определением говорящих"
+            f"❌ <b>Tracker error</b>\n\n"
+            f"📝 File: <code>{s3_key}</code>\n"
+            f"⚠️ Error: {error_message}"
+        )
+        self.send_message_sync(text)
+
+    def notify_processing_started(self, files_count: int):
+        """
+        Notification about processing start
+
+        Args:
+            files_count: Number of files to process
+        """
+        text = (
+            f"🔄 <b>Starting processing</b>\n\n"
+            f"📊 Files to process: <b>{files_count}</b>\n"
+            f"⚙️ Transcription with speaker diarization"
         )
 
         self.send_message_sync(text)
@@ -320,19 +345,19 @@ class TelegramNotifier:
         size_mb: float
     ):
         """
-        Уведомление об обработке файла
+        Notification about file processing
 
         Args:
-            file_num: Номер файла
-            total_files: Всего файлов
-            filename: Имя файла
-            duration_min: Длительность в минутах
-            size_mb: Размер в MB
+            file_num: File number
+            total_files: Total files
+            filename: File name
+            duration_min: Duration in minutes
+            size_mb: Size in MB
         """
         text = (
-            f"🎤 <b>[{file_num}/{total_files}]</b> Обрабатываю...\n\n"
+            f"🎤 <b>[{file_num}/{total_files}]</b> Processing...\n\n"
             f"📝 {filename}\n"
-            f"⏱ {duration_min:.1f} мин\n"
+            f"⏱ {duration_min:.1f} min\n"
             f"💾 {size_mb:.1f} MB"
         )
 
@@ -349,41 +374,38 @@ class TelegramNotifier:
         transcription_preview: str = None
     ):
         """
-        Уведомление об окончании транскрибации файла
+        Notification about transcription completion
 
         Args:
-            file_num: Номер файла
-            total_files: Всего файлов
-            filename: Имя файла
-            word_count: Количество слов
-            char_count: Количество символов
-            speaker_stats: Статистика по говорящим (опционально)
-            transcription_preview: Первые 500 символов транскрипции (опционально)
+            file_num: File number
+            total_files: Total files
+            filename: File name
+            word_count: Word count
+            char_count: Character count
+            speaker_stats: Speaker statistics (optional)
+            transcription_preview: First 500 characters of transcription (optional)
         """
         text = (
-            f"✅ <b>[{file_num}/{total_files}]</b> Готово!\n\n"
+            f"✅ <b>[{file_num}/{total_files}]</b> Done!\n\n"
             f"📝 {filename}\n"
-            f"📊 Слов: <b>{word_count}</b>\n"
-            f"📄 Символов: <b>{char_count}</b>"
+            f"📊 Words: <b>{word_count}</b>\n"
+            f"📄 Characters: <b>{char_count}</b>"
         )
 
-        # Добавляем статистику по говорящим если есть
         if speaker_stats:
-            text += f"\n\n👥 Говорящих: <b>{len(speaker_stats)}</b>"
+            text += f"\n\n👥 Speakers: <b>{len(speaker_stats)}</b>"
             for speaker, stats in speaker_stats.items():
                 text += (
-                    f"\n  • Собеседник {speaker}: "
-                    f"{stats['utterances']} реплик, "
-                    f"{stats['total_time']:.1f}с"
+                    f"\n  • Speaker {speaker}: "
+                    f"{stats['utterances']} utterances, "
+                    f"{stats['total_time']:.1f}s"
                 )
 
-        # Добавляем превью транскрипции (первые 500 символов)
         if transcription_preview:
             preview = transcription_preview[:500]
-            # Если текст обрезан, добавляем многоточие
             if len(transcription_preview) > 500:
                 preview += "..."
-            text += f"\n\n📄 <b>Текст:</b>\n<i>{preview}</i>"
+            text += f"\n\n📄 <b>Text:</b>\n<i>{preview}</i>"
 
         self.send_message_sync(text)
 
@@ -394,50 +416,49 @@ class TelegramNotifier:
         device_name: str = None
     ):
         """
-        Уведомление об окончании всей обработки
+        Notification about all processing completion
 
         Args:
-            files_count: Количество обработанных файлов
-            total_duration_min: Общая длительность в минутах
-            device_name: Имя устройства
+            files_count: Number of processed files
+            total_duration_min: Total duration in minutes
+            device_name: Device name
         """
         text = (
-            f"🎉 <b>ВСЁ ГОТОВО!</b>\n\n"
-            f"✅ Обработано файлов: <b>{files_count}</b>\n"
+            f"🎉 <b>ALL DONE!</b>\n\n"
+            f"✅ Files processed: <b>{files_count}</b>\n"
         )
 
         if total_duration_min:
-            text += f"⏱ Общая длительность: <b>{total_duration_min:.1f} мин</b>\n"
+            text += f"⏱ Total duration: <b>{total_duration_min:.1f} min</b>\n"
 
         if device_name:
-            text += f"🆔 Устройство: <code>{device_name}</code>"
+            text += f"🆔 Device: <code>{device_name}</code>"
 
         self.send_message_sync(text)
 
     def notify_error(self, error_message: str, filename: str = None):
         """
-        Уведомление об ошибке
+        Error notification
 
         Args:
-            error_message: Текст ошибки
-            filename: Имя файла (если применимо)
+            error_message: Error text
+            filename: File name (if applicable)
         """
-        text = f"❌ <b>ОШИБКА</b>\n\n"
+        text = f"❌ <b>ERROR</b>\n\n"
 
         if filename:
-            text += f"📝 Файл: {filename}\n"
+            text += f"📝 File: {filename}\n"
 
         text += f"⚠️ {error_message}"
 
         self.send_message_sync(text)
 
     async def close(self):
-        """Закрытие соединения с Telegram (не требуется, т.к. бот создается для каждой отправки)"""
+        """Close Telegram connection (not required as bot is created for each send)"""
         pass
 
 
 if __name__ == "__main__":
-    # Тестирование модуля
     import os
     from dotenv import load_dotenv
 
@@ -454,7 +475,7 @@ if __name__ == "__main__":
     if bot_token and chat_id:
         notifier = TelegramNotifier(bot_token=bot_token, chat_id=chat_id)
 
-        print("\nОтправка тестовых уведомлений...\n")
+        print("\nSending test notifications...\n")
 
         notifier.notify_device_connected(
             device_path="/media/usb0",
@@ -486,6 +507,6 @@ if __name__ == "__main__":
 
         notifier.notify_all_complete(files_count=3, total_duration_min=120.5)
 
-        print("\n✅ Тестовые уведомления отправлены!")
+        print("\nTest notifications sent!")
     else:
-        print("❌ Установите TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env файле")
+        print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env file")

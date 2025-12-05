@@ -4,6 +4,8 @@ USB Audio Recorder Transcription Pipeline
 Автоматическая транскрибация аудиозаписей с USB диктофонов
 """
 
+__version__ = "0.5"
+
 import os
 import sys
 import logging
@@ -129,7 +131,7 @@ class TranscriptionPipeline:
         self.logger = logging.getLogger(self.__class__.__name__)
 
         # Инициализация компонентов
-        self.logger.info("Инициализация компонентов пайплайна...")
+        self.logger.info("Initializing pipeline components...")
 
         self.num_speakers = num_speakers
         self.transcribe_conversation = transcribe_conversation
@@ -147,10 +149,10 @@ class TranscriptionPipeline:
                 api_key=assemblyai_api_key,
                 language=language
             )
-            self.logger.info("Используется AssemblyAI (с diarization)")
+            self.logger.info("Using AssemblyAI (with diarization)")
         else:
             self.transcriber = None
-            self.logger.info("Транскрибация отключена (TRANSCRIBE_CONVERSATION=false)")
+            self.logger.info("Transcription disabled (TRANSCRIBE_CONVERSATION=false)")
 
         # Telegram уведомления
         self.telegram = TelegramNotifier(
@@ -177,12 +179,12 @@ class TranscriptionPipeline:
                 )
                 # Передаем S3Uploader в FileManager
                 self.file_manager.s3_uploader = self.s3_uploader
-                self.logger.info("✅ S3 Object Storage инициализирован")
+                self.logger.info("S3 Object Storage initialized")
             except Exception as e:
-                self.logger.error(f"❌ Ошибка инициализации S3: {e}")
+                self.logger.error(f"S3 initialization error: {e}")
                 self.s3_enabled = False
         elif s3_enabled:
-            self.logger.warning("⚠️ S3 включен, но не все параметры заданы. S3 будет отключен.")
+            self.logger.warning("S3 enabled but not all parameters set. S3 will be disabled.")
             self.s3_enabled = False
 
         # Яндекс Трекер
@@ -192,14 +194,14 @@ class TranscriptionPipeline:
             enabled=tracker_enabled
         )
         if tracker_enabled and self.tracker.enabled:
-            self.logger.info(f"✅ Яндекс Трекер инициализирован (очередь: {tracker_queue})")
+            self.logger.info(f"Yandex Tracker initialized (queue: {tracker_queue})")
 
         # Передаём Tracker в FileManager для создания тикетов в ThreadPoolExecutor
         self.file_manager.tracker_client = self.tracker
         self.file_manager.s3_presigned_url_expiry = self.s3_presigned_url_expiry
         self.file_manager.transcribe_conversation = self.transcribe_conversation
 
-        self.logger.info("✅ Пайплайн готов к работе")
+        self.logger.info("Pipeline ready")
 
     def save_transcription_to_file(
         self,
@@ -309,9 +311,9 @@ class TranscriptionPipeline:
         try:
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(content)
-            self.logger.info(f"📄 Транскрипция сохранена в: {output_file}")
+            self.logger.info(f"Transcription saved to: {output_file}")
         except Exception as e:
-            self.logger.error(f"Ошибка сохранения в файл {output_file}: {e}")
+            self.logger.error(f"Error saving to file {output_file}: {e}")
 
     def process_device(self, device_path: str, device_name: str = None):
         """
@@ -329,17 +331,17 @@ class TranscriptionPipeline:
             device_name = device_info['unique_id']
 
             self.logger.info(f"\n{'='*60}")
-            self.logger.info(f"Обработка устройства: {device_path}")
-            self.logger.info(f"Уникальный ID: {device_name}")
+            self.logger.info(f"Processing device: {device_path}")
+            self.logger.info(f"Unique ID: {device_name}")
             if device_info['label']:
-                self.logger.info(f"Метка: {device_info['label']}")
+                self.logger.info(f"Label: {device_info['label']}")
             if device_info['uuid']:
                 self.logger.info(f"UUID: {device_info['uuid'][:16]}...")
             self.logger.info(f"{'='*60}\n")
         else:
             self.logger.info(f"\n{'='*60}")
-            self.logger.info(f"Обработка устройства: {device_path}")
-            self.logger.info(f"ID устройства: {device_name}")
+            self.logger.info(f"Processing device: {device_path}")
+            self.logger.info(f"Device ID: {device_name}")
             self.logger.info(f"{'='*60}\n")
 
         # ============================================================
@@ -347,23 +349,23 @@ class TranscriptionPipeline:
         # ============================================================
         incomplete_tasks = self.file_manager.recover_incomplete_tasks()
         if incomplete_tasks:
-            self.logger.info(f"\n🔄 Восстановление {len(incomplete_tasks)} незавершённых задач...")
+            self.logger.info(f"\nRecovering {len(incomplete_tasks)} incomplete tasks...")
             self.process_incomplete_tasks(incomplete_tasks)
 
         # ============================================================
         # ЭТАП 1: КОПИРОВАНИЕ ВСЕХ ФАЙЛОВ С ФЛЕШКИ НА ЖЕСТКИЙ ДИСК
         # ============================================================
-        self.logger.info("📋 ЭТАП 1: Поиск и копирование новых аудиофайлов...")
-        self.logger.info("   (Сначала копируем ВСЕ файлы, потом обрабатываем)")
+        self.logger.info("STAGE 1: Finding and copying new audio files...")
+        self.logger.info("   (First copy ALL files, then process)")
 
         copied_files = self.file_manager.process_new_files(device_path, device_name=device_name)
 
         if not copied_files:
-            self.logger.info("✓ Новых файлов не найдено")
+            self.logger.info("No new files found")
             return
 
-        self.logger.info(f"\n✅ ВСЕ ФАЙЛЫ СКОПИРОВАНЫ НА ЖЕСТКИЙ ДИСК: {len(copied_files)} файлов")
-        self.logger.info("   Теперь можно безопасно отключить флешку")
+        self.logger.info(f"\nALL FILES COPIED TO DISK: {len(copied_files)} files")
+        self.logger.info("   You can now safely disconnect the flash drive")
 
         # Telegram: уведомление об окончании копирования
         self.telegram.notify_copying_complete(
@@ -375,22 +377,22 @@ class TranscriptionPipeline:
         # ПРОВЕРКА: НУЖНА ЛИ ТРАНСКРИБАЦИЯ
         # ============================================================
         if not self.transcribe_conversation:
-            self.logger.info("\n⏹️  Транскрибация отключена (TRANSCRIBE_CONVERSATION=false)")
-            self.logger.info("   Процесс завершен после создания задач в трекере")
+            self.logger.info("\nTranscription disabled (TRANSCRIBE_CONVERSATION=false)")
+            self.logger.info("   Process completed after creating tracker issues")
             return
 
         # ============================================================
         # ЭТАП 2: ОБРАБОТКА СКОПИРОВАННЫХ ФАЙЛОВ
         # ============================================================
-        self.logger.info(f"\n🔄 ЭТАП 2: Транскрибация файлов ({len(copied_files)} шт)")
-        self.logger.info("   (Транскрибация с определением говорящих через AssemblyAI)")
+        self.logger.info(f"\nSTAGE 2: Transcribing files ({len(copied_files)} pcs)")
+        self.logger.info("   (Transcription with speaker diarization via AssemblyAI)")
 
         # Telegram: уведомление о начале обработки
         self.telegram.notify_processing_started(files_count=len(copied_files))
 
         for i, file_info in enumerate(copied_files, 1):
             self.logger.info(f"\n{'─'*60}")
-            self.logger.info(f"📝 Файл {i}/{len(copied_files)}: {Path(file_info['local_path']).name}")
+            self.logger.info(f"File {i}/{len(copied_files)}: {Path(file_info['local_path']).name}")
             self.logger.info(f"{'─'*60}")
             self.process_file(file_info, file_num=i, total_files=len(copied_files))
 
@@ -420,14 +422,17 @@ class TranscriptionPipeline:
                     if file_key in self.file_manager.processed_files:
                         del self.file_manager.processed_files[file_key]
                         self.file_manager._save_processed_files()
-                    self.logger.info(f"      → Удалён из метаданных, будет скопирован заново")
+                    self.logger.info(f"      -> Removed from metadata, will be copied again")
                 else:
-                    self.logger.warning(f"      → Исходный файл не найден: {original_path}")
+                    self.logger.warning(f"      -> Original file not found: {original_path}")
 
             elif action == "s3_upload":
                 # Нужна загрузка в S3
                 local_path = meta.get("local_path")
                 if local_path and Path(local_path).exists():
+                    # Get original filename for later use
+                    original_filename = Path(meta.get("original_path", local_path)).name
+
                     # Используем существующий s3_key если есть, иначе формируем новый
                     s3_key = meta.get("s3_key")
                     if not s3_key:
@@ -440,26 +445,30 @@ class TranscriptionPipeline:
 
                         # Формируем S3 ключ с датой из имени файла
                         from src.file_manager import FileManager
-                        original_filename = Path(meta.get("original_path", local_path)).name
                         date_folder = FileManager.extract_date_from_filename(original_filename)
                         s3_key = f"{date_folder}/{device}/{original_filename}"
 
                     # STAGE: s3_uploading
                     self.file_manager.update_metadata(file_key, {"stage": "s3_uploading"})
 
-                    # Проверяем существование в S3
-                    if self.s3_uploader.file_exists(s3_key):
-                        self.logger.info(f"      → Уже в S3: {s3_key}")
+                    # Check if file exists in S3
+                    exists, exists_error = self.s3_uploader.file_exists(s3_key)
+
+                    if exists_error:
+                        self.logger.warning(f"      -> S3 check failed: {exists_error}, will try to upload")
+
+                    if exists and not exists_error:
+                        self.logger.info(f"      -> Already in S3: {s3_key}")
                         self.file_manager.update_metadata(file_key, {
                             "stage": "s3_uploaded",
                             "s3_key": s3_key
                         })
-                        # Telegram уведомление
+                        # Telegram notification
                         if self.telegram:
                             size_mb = meta.get("size_bytes", 0) / (1024 * 1024)
                             self.telegram.notify_s3_already_exists(s3_key=s3_key, size_mb=size_mb)
 
-                        # Создаём тикет если ещё нет
+                        # Create ticket if not exists
                         if self.tracker.enabled and not meta.get("tracker_issue_key"):
                             self.file_manager.update_metadata(file_key, {"stage": "tracker_creating"})
                             presigned_url = self.s3_uploader.generate_presigned_url(
@@ -477,7 +486,7 @@ class TranscriptionPipeline:
                                 if issue:
                                     issue_key = issue.get('key')
                                     issue_url = issue.get('self')
-                                    self.logger.info(f"      → Задача создана: {issue_key}")
+                                    self.logger.info(f"      -> Issue created: {issue_key}")
                                     self.file_manager.update_metadata(file_key, {
                                         "stage": "completed",
                                         "tracker_issue_key": issue_key,
@@ -490,13 +499,13 @@ class TranscriptionPipeline:
                                             issue_url=issue_url
                                         )
                     else:
-                        # Загружаем
-                        s3_success = self.s3_uploader.upload_file(
+                        # Upload file
+                        s3_success, s3_error = self.s3_uploader.upload_file(
                             file_path=Path(local_path),
                             s3_key=s3_key
                         )
                         if s3_success:
-                            self.logger.info(f"      → Загружен в S3: {s3_key}")
+                            self.logger.info(f"      -> Uploaded to S3: {s3_key}")
                             self.file_manager.update_metadata(file_key, {
                                 "stage": "s3_uploaded",
                                 "s3_key": s3_key
@@ -528,7 +537,7 @@ class TranscriptionPipeline:
                                     if issue:
                                         issue_key = issue.get('key')
                                         issue_url = issue.get('self')
-                                        self.logger.info(f"      → Задача создана: {issue_key}")
+                                        self.logger.info(f"      -> Issue created: {issue_key}")
                                         self.file_manager.update_metadata(file_key, {
                                             "stage": "completed",
                                             "tracker_issue_key": issue_key,
@@ -541,14 +550,19 @@ class TranscriptionPipeline:
                                                 issue_url=issue_url
                                             )
                         else:
-                            self.logger.error(f"      → Ошибка загрузки в S3")
+                            self.logger.error(f"      -> S3 upload error: {s3_error}")
+                            if self.telegram:
+                                self.telegram.notify_s3_upload_error(
+                                    filename=original_filename,
+                                    error_message=s3_error or "Upload failed"
+                                )
                 else:
-                    self.logger.warning(f"      → Локальный файл не найден: {local_path}")
+                    self.logger.warning(f"      -> Local file not found: {local_path}")
 
             elif action == "tracker":
                 # Нужно создание тикета
                 s3_key = meta.get("s3_key")
-                if s3_key and not meta.get("tracker_issue_key"):
+                if s3_key and not meta.get("tracker_issue_key") and self.s3_uploader:
                     # STAGE: tracker_creating
                     self.file_manager.update_metadata(file_key, {"stage": "tracker_creating"})
 
@@ -569,7 +583,7 @@ class TranscriptionPipeline:
                         if issue:
                             issue_key = issue.get('key')
                             issue_url = issue.get('self')
-                            self.logger.info(f"      → Задача создана: {issue_key}")
+                            self.logger.info(f"      -> Issue created: {issue_key}")
 
                             # STAGE: completed
                             self.file_manager.update_metadata(file_key, {
@@ -586,15 +600,15 @@ class TranscriptionPipeline:
                                     issue_url=issue_url
                                 )
                         else:
-                            self.logger.error(f"      → Ошибка создания тикета")
+                            self.logger.error(f"      -> Issue creation error")
                     else:
-                        self.logger.error(f"      → Не удалось сгенерировать presigned URL")
+                        self.logger.error(f"      -> Failed to generate presigned URL")
                 elif meta.get("tracker_issue_key"):
                     # Тикет уже создан, просто обновляем stage
                     self.file_manager.update_metadata(file_key, {"stage": "completed"})
-                    self.logger.info(f"      → Тикет уже существует: {meta.get('tracker_issue_key')}")
+                    self.logger.info(f"      -> Issue already exists: {meta.get('tracker_issue_key')}")
 
-        self.logger.info(f"✅ Recovery завершён: {len(incomplete_tasks)} задач обработано")
+        self.logger.info(f"Recovery completed: {len(incomplete_tasks)} tasks processed")
 
     def process_file(self, file_info: dict, file_num: int = 1, total_files: int = 1):
         """
@@ -635,12 +649,12 @@ class TranscriptionPipeline:
 
             # ПРОВЕРКА: НУЖНА ЛИ ТРАНСКРИБАЦИЯ
             if not self.transcribe_conversation:
-                self.logger.info("⏹️  Транскрибация отключена (TRANSCRIBE_CONVERSATION=false)")
-                self.logger.info("   Файл скопирован, транскрибация пропущена")
+                self.logger.info("Transcription disabled (TRANSCRIBE_CONVERSATION=false)")
+                self.logger.info("   File copied, transcription skipped")
                 return
 
             # Транскрибация через AssemblyAI
-            self.logger.info("🎤 Отправка в AssemblyAI для транскрибации с diarization...")
+            self.logger.info("Sending to AssemblyAI for transcription with diarization...")
             transcription = self.transcriber.transcribe_with_speakers(
                 file_path,
                 num_speakers=self.num_speakers
@@ -662,9 +676,9 @@ class TranscriptionPipeline:
             word_count = len(transcription['text'].split())
             char_count = len(transcription['text'])
 
-            self.logger.info(f"\n✅ ГОТОВО!")
-            self.logger.info(f"   Символов: {char_count}, Слов: {word_count}")
-            self.logger.info(f"   Фрагмент: {transcription['text'][:100]}...")
+            self.logger.info(f"\nDONE!")
+            self.logger.info(f"   Characters: {char_count}, Words: {word_count}")
+            self.logger.info(f"   Preview: {transcription['text'][:100]}...")
 
             # Telegram: уведомление об окончании транскрибации файла
             speaker_stats = transcription.get('speaker_stats') if transcription else None
@@ -686,7 +700,7 @@ class TranscriptionPipeline:
             )
 
         except Exception as e:
-            self.logger.error(f"\n❌ ОШИБКА: {e}", exc_info=True)
+            self.logger.error(f"\nERROR: {e}", exc_info=True)
 
             # Telegram: уведомление об ошибке
             self.telegram.notify_error(
@@ -701,7 +715,7 @@ def monitor_mode(args):
     import time
 
     logger = logging.getLogger("monitor_mode")
-    logger.info("Запуск режима мониторинга USB устройств...")
+    logger.info("Starting USB device monitoring mode...")
 
     pipeline = TranscriptionPipeline(
         assemblyai_api_key=getattr(args, 'assemblyai_api_key', None),
@@ -738,28 +752,28 @@ def monitor_mode(args):
             try:
                 incomplete_tasks = pipeline.file_manager.recover_incomplete_tasks()
                 if incomplete_tasks:
-                    logger.info(f"\n🔄 Recovery: найдено {len(incomplete_tasks)} незавершённых задач")
+                    logger.info(f"\nRecovery: found {len(incomplete_tasks)} incomplete tasks")
                     pipeline.process_incomplete_tasks(incomplete_tasks)
             except Exception as e:
-                logger.error(f"Ошибка recovery: {e}")
+                logger.error(f"Recovery error: {e}")
             recovery_stop_event.wait(15)  # Ждём 15 секунд
 
     recovery_thread = threading.Thread(target=recovery_check_loop, daemon=True)
     recovery_thread.start()
-    logger.info("✅ Recovery проверка запущена (каждые 15 сек)")
+    logger.info("Recovery check started (every 15 sec)")
 
     # Уведомление о запуске
-    pipeline.telegram.notify_process_started()
+    pipeline.telegram.notify_process_started(version=__version__)
 
     def on_device_connected(device_path):
         """Обработчик подключения нового устройства"""
-        logger.info(f"\n🔌 Новое устройство подключено: {device_path}")
+        logger.info(f"\nNew device connected: {device_path}")
 
         # Получаем информацию об устройстве
         device_info = USBMonitor.get_device_info(device_path)
-        logger.info(f"   Уникальный ID: {device_info['unique_id']}")
+        logger.info(f"   Unique ID: {device_info['unique_id']}")
         if device_info['label']:
-            logger.info(f"   Метка: {device_info['label']}")
+            logger.info(f"   Label: {device_info['label']}")
         if device_info['uuid']:
             logger.info(f"   UUID: {device_info['uuid'][:16]}...")
 
@@ -772,20 +786,20 @@ def monitor_mode(args):
 
         # Проверяем, есть ли аудио файлы
         if not USBMonitor.is_audio_recorder(device_path):
-            logger.info("⚠️  Аудио файлы не найдены, пропускаем")
+            logger.info("No audio files found, skipping")
             return
 
-        logger.info("✅ Обнаружен аудио диктофон, начинаем обработку...")
+        logger.info("Audio recorder detected, starting processing...")
 
         try:
             # Передаем уже полученный device_name
             pipeline.process_device(device_path, device_name=device_info['unique_id'])
         except Exception as e:
-            logger.error(f"Ошибка обработки устройства: {e}", exc_info=True)
+            logger.error(f"Device processing error: {e}", exc_info=True)
 
     def on_device_disconnected(device_path):
         """Обработчик отключения устройства"""
-        logger.info(f"\n⏏️ Устройство отключено: {device_path}")
+        logger.info(f"\nDevice disconnected: {device_path}")
         pipeline.telegram.notify_device_disconnected(device_path)
 
     # Запускаем мониторинг
@@ -823,16 +837,16 @@ def process_mode(args):
     path = Path(args.path)
 
     if not path.exists():
-        logger.error(f"Путь не найден: {path}")
+        logger.error(f"Path not found: {path}")
         sys.exit(1)
 
     if path.is_dir():
         # Обрабатываем как устройство
-        logger.info(f"Обработка устройства: {path}")
+        logger.info(f"Processing device: {path}")
         pipeline.process_device(str(path))
     else:
         # Обрабатываем как отдельный файл
-        logger.info(f"Обработка файла: {path}")
+        logger.info(f"Processing file: {path}")
 
         # Формируем ключ файла: manual_filename
         file_key = f"manual_{path.name}"

@@ -1,6 +1,6 @@
 """
-USB устройства мониторинг и обнаружение
-Обнаруживает подключение новых USB диктофонов
+USB device monitoring and detection
+Detects connection of new USB recorders
 """
 
 import os
@@ -15,99 +15,90 @@ logger = logging.getLogger(__name__)
 
 
 class USBMonitor:
-    """Мониторинг USB устройств и обнаружение диктофонов"""
+    """USB device monitoring and recorder detection"""
 
     def __init__(self, check_interval: int = 5):
         """
         Args:
-            check_interval: Интервал проверки новых устройств (секунды)
+            check_interval: Interval for checking new devices (seconds)
         """
         self.check_interval = check_interval
         self.known_devices: Set[str] = set()
-        self.processing_devices: Set[str] = set()  # Устройства в процессе обработки
+        self.processing_devices: Set[str] = set()
         self._initialize_known_devices()
 
     def _initialize_known_devices(self):
-        """Инициализация списка известных устройств при старте"""
+        """Initialize list of known devices at startup"""
         devices = self.get_mounted_devices()
         self.known_devices = set(devices)
-        logger.info(f"Инициализировано {len(self.known_devices)} известных устройств")
+        logger.info(f"Initialized {len(self.known_devices)} known devices")
 
     @staticmethod
     def get_mounted_devices() -> List[str]:
-        """Получить список смонтированных USB устройств с фильтрацией по label PERU_"""
+        """Get list of mounted USB devices filtered by PERU_ label"""
         devices = []
 
         for partition in psutil.disk_partitions(all=False):
-            # Фильтруем только съемные устройства (обычно /media, /mnt или removable)
             mount_point = partition.mountpoint
 
-            # В Linux USB обычно монтируются в /media или /mnt
-            # В macOS USB монтируются в /Volumes
             if '/media' in mount_point or '/mnt' in mount_point or '/Volumes' in mount_point:
-                # Исключаем системный диск macOS
                 if mount_point not in ['/', '/Volumes/Macintosh HD']:
                     if os.path.exists(mount_point) and os.path.isdir(mount_point):
-                        # Проверяем label устройства - только PERU_*
                         device_info = USBMonitor.get_device_info(mount_point)
                         label = device_info.get('label') or ''
                         if label.startswith('PERU_'):
                             devices.append(mount_point)
                         else:
-                            logger.debug(f"Устройство {mount_point} пропущено: label '{label}' не начинается с PERU_")
-            # Дополнительная проверка для removable устройств
+                            logger.debug(f"Device {mount_point} skipped: label '{label}' does not start with PERU_")
             elif partition.device.startswith('/dev/sd'):
                 try:
-                    # Проверяем, является ли устройство съемным
                     device_name = partition.device.split('/')[-1].rstrip('0123456789')
                     removable_path = f"/sys/block/{device_name}/removable"
                     if os.path.exists(removable_path):
                         with open(removable_path, 'r') as f:
                             if f.read().strip() == '1':
-                                # Проверяем label устройства - только PERU_*
                                 device_info = USBMonitor.get_device_info(mount_point)
                                 label = device_info.get('label') or ''
                                 if label.startswith('PERU_'):
                                     devices.append(mount_point)
                                 else:
-                                    logger.debug(f"Устройство {mount_point} пропущено: label '{label}' не начинается с PERU_")
+                                    logger.debug(f"Device {mount_point} skipped: label '{label}' does not start with PERU_")
                 except Exception as e:
-                    logger.debug(f"Ошибка проверки устройства {partition.device}: {e}")
+                    logger.debug(f"Device check error {partition.device}: {e}")
 
         return devices
 
     def detect_new_devices(self) -> List[str]:
         """
-        Обнаружение новых подключенных устройств
+        Detect newly connected devices
 
         Returns:
-            Список путей к новым устройствам
+            List of paths to new devices
         """
         current_devices = set(self.get_mounted_devices())
         new_devices = list(current_devices - self.known_devices)
 
         if new_devices:
-            logger.info(f"Обнаружено новых устройств: {len(new_devices)}")
+            logger.info(f"New devices detected: {len(new_devices)}")
             for device in new_devices:
                 logger.info(f"  - {device}")
 
-        # Обновляем список известных устройств
         self.known_devices = current_devices
 
         return new_devices
 
     def detect_disconnected_devices(self) -> List[str]:
         """
-        Обнаружение отключенных устройств
+        Detect disconnected devices
 
         Returns:
-            Список путей к отключенным устройствам
+            List of paths to disconnected devices
         """
         current_devices = set(self.get_mounted_devices())
         disconnected = list(self.known_devices - current_devices)
 
         if disconnected:
-            logger.info(f"Обнаружено отключенных устройств: {len(disconnected)}")
+            logger.info(f"Disconnected devices detected: {len(disconnected)}")
             for device in disconnected:
                 logger.info(f"  - {device}")
 
@@ -115,96 +106,85 @@ class USBMonitor:
 
     def monitor(self, callback=None, on_disconnect=None):
         """
-        Непрерывный мониторинг USB устройств
+        Continuous USB device monitoring
 
         Args:
-            callback: Функция обратного вызова для обработки новых устройств
-                     Сигнатура: callback(device_path: str)
-            on_disconnect: Функция обратного вызова при отключении устройства
-                     Сигнатура: on_disconnect(device_path: str)
+            callback: Callback function for processing new devices
+                     Signature: callback(device_path: str)
+            on_disconnect: Callback function when device disconnects
+                     Signature: on_disconnect(device_path: str)
         """
-        logger.info("Запуск мониторинга USB устройств...")
-        logger.info(f"Интервал проверки: {self.check_interval} сек")
+        logger.info("Starting USB device monitoring...")
+        logger.info(f"Check interval: {self.check_interval} sec")
 
-        # Флаг первого запуска - проверяем уже подключенные устройства
         first_run = True
 
         try:
             while True:
-                # Сначала проверяем отключенные устройства
                 current_devices = set(self.get_mounted_devices())
                 disconnected = list(self.known_devices - current_devices)
 
                 if disconnected and on_disconnect:
                     for device in disconnected:
-                        logger.info(f"⏏️ Устройство отключено: {device}")
+                        logger.info(f"Device disconnected: {device}")
                         try:
                             on_disconnect(device)
                         except Exception as e:
-                            logger.error(f"Ошибка обработки отключения {device}: {e}")
+                            logger.error(f"Disconnect handling error {device}: {e}")
 
-                # Обновляем known_devices после проверки отключений
                 new_devices = list(current_devices - self.known_devices)
                 if new_devices:
-                    logger.info(f"Обнаружено новых устройств: {len(new_devices)}")
+                    logger.info(f"New devices detected: {len(new_devices)}")
                     for device in new_devices:
                         logger.info(f"  - {device}")
 
                 self.known_devices = current_devices
 
-                # Устройства для обработки
                 devices_to_process = []
 
-                # При первом запуске обрабатываем все уже подключенные устройства
                 if first_run:
                     current_list = list(self.known_devices)
                     if current_list:
-                        logger.info(f"Первый запуск: проверка {len(current_list)} уже подключенных устройств...")
+                        logger.info(f"First run: checking {len(current_list)} already connected devices...")
                         devices_to_process.extend(current_list)
                     first_run = False
 
-                # Добавляем новые устройства
                 devices_to_process.extend(new_devices)
 
                 if devices_to_process and callback:
                     for device in devices_to_process:
-                        # Проверяем что устройство не обрабатывается в данный момент
                         if device in self.processing_devices:
-                            logger.info(f"⚠️  Устройство {device} уже обрабатывается, пропускаем")
+                            logger.info(f"Device {device} already being processed, skipping")
                             continue
 
                         try:
-                            # Добавляем устройство в список обрабатываемых
                             self.processing_devices.add(device)
-                            logger.debug(f"Начата обработка устройства {device}")
+                            logger.debug(f"Started processing device {device}")
 
-                            # Вызываем callback для обработки устройства
                             callback(device)
 
-                            # Удаляем из списка обрабатываемых после завершения
                             self.processing_devices.discard(device)
-                            logger.debug(f"Завершена обработка устройства {device}")
+                            logger.debug(f"Finished processing device {device}")
 
                         except Exception as e:
-                            logger.error(f"Ошибка обработки устройства {device}: {e}")
-                            # Обязательно удаляем из списка обрабатываемых при ошибке
+                            logger.error(f"Device processing error {device}: {e}")
                             self.processing_devices.discard(device)
 
                 time.sleep(self.check_interval)
 
         except KeyboardInterrupt:
-            logger.info("Мониторинг остановлен пользователем")
+            logger.info("Monitoring stopped by user")
 
     @staticmethod
     def get_device_info(mount_point: str) -> Dict[str, str]:
         """
-        Получить уникальную информацию об устройстве
+        Get unique device information
 
         Args:
-            mount_point: Точка монтирования устройства
+            mount_point: Device mount point
 
         Returns:
-            Словарь с информацией об устройстве (uuid, label, serial, unique_id)
+            Dictionary with device info (uuid, label, serial, unique_id)
         """
         info = {
             'mount_point': mount_point,
@@ -216,21 +196,18 @@ class USBMonitor:
         }
 
         try:
-            # Получаем устройство для точки монтирования
             for partition in psutil.disk_partitions(all=False):
                 if partition.mountpoint == mount_point:
                     info['device'] = partition.device
                     break
 
             if not info['device']:
-                logger.warning(f"Не найдено устройство для {mount_point}")
-                # Используем имя точки монтирования как fallback
+                logger.warning(f"Device not found for {mount_point}")
                 info['unique_id'] = Path(mount_point).name
                 return info
 
             device = info['device']
 
-            # Получаем UUID устройства
             try:
                 result = subprocess.run(
                     ['blkid', '-s', 'UUID', '-o', 'value', device],
@@ -241,9 +218,8 @@ class USBMonitor:
                 if result.returncode == 0 and result.stdout.strip():
                     info['uuid'] = result.stdout.strip()
             except Exception as e:
-                logger.debug(f"Не удалось получить UUID для {device}: {e}")
+                logger.debug(f"Failed to get UUID for {device}: {e}")
 
-            # Получаем LABEL устройства
             try:
                 result = subprocess.run(
                     ['blkid', '-s', 'LABEL', '-o', 'value', device],
@@ -254,9 +230,8 @@ class USBMonitor:
                 if result.returncode == 0 and result.stdout.strip():
                     info['label'] = result.stdout.strip()
             except Exception as e:
-                logger.debug(f"Не удалось получить LABEL для {device}: {e}")
+                logger.debug(f"Failed to get LABEL for {device}: {e}")
 
-            # На macOS используем diskutil для получения label
             if not info['label'] and device:
                 try:
                     result = subprocess.run(
@@ -273,18 +248,14 @@ class USBMonitor:
                                     info['label'] = label
                                 break
                 except Exception as e:
-                    logger.debug(f"Не удалось получить label через diskutil для {device}: {e}")
+                    logger.debug(f"Failed to get label via diskutil for {device}: {e}")
 
-            # Fallback: если label всё ещё не найден, используем имя точки монтирования
             if not info['label']:
                 mount_name = Path(mount_point).name
-                # Исключаем системные директории
                 if not mount_name.startswith('System') and mount_name not in ['VM', 'Preboot', 'Update', 'Data', 'Hardware', 'xarts', 'iSCPreboot']:
                     info['label'] = mount_name
 
-            # Получаем serial number (если доступен)
             try:
-                # Извлекаем имя устройства без номера раздела (sdb1 -> sdb)
                 device_name = device.split('/')[-1].rstrip('0123456789')
                 serial_path = f"/sys/block/{device_name}/device/serial"
 
@@ -292,10 +263,8 @@ class USBMonitor:
                     with open(serial_path, 'r') as f:
                         info['serial'] = f.read().strip()
             except Exception as e:
-                logger.debug(f"Не удалось получить serial для {device}: {e}")
+                logger.debug(f"Failed to get serial for {device}: {e}")
 
-            # Формируем уникальный ID
-            # Приоритет: UUID > Serial > Label > имя точки монтирования
             if info['uuid']:
                 info['unique_id'] = f"UUID_{info['uuid'][:8]}"
             elif info['serial']:
@@ -303,14 +272,12 @@ class USBMonitor:
             elif info['label']:
                 info['unique_id'] = info['label']
             else:
-                # Последний вариант - используем имя точки монтирования
                 info['unique_id'] = Path(mount_point).name
 
-            logger.debug(f"Информация об устройстве {mount_point}: {info}")
+            logger.debug(f"Device info {mount_point}: {info}")
 
         except Exception as e:
-            logger.error(f"Ошибка получения информации об устройстве {mount_point}: {e}")
-            # Fallback - используем имя точки монтирования
+            logger.error(f"Error getting device info {mount_point}: {e}")
             info['unique_id'] = Path(mount_point).name
 
         return info
@@ -318,14 +285,14 @@ class USBMonitor:
     @staticmethod
     def is_audio_recorder(device_path: str) -> bool:
         """
-        Проверка, является ли устройство аудио диктофоном
-        Проверяет наличие аудио файлов
+        Check if device is an audio recorder
+        Checks for audio files presence
 
         Args:
-            device_path: Путь к устройству
+            device_path: Path to device
 
         Returns:
-            True если найдены аудио файлы
+            True if audio files found
         """
         audio_extensions = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.wma'}
 
@@ -335,35 +302,33 @@ class USBMonitor:
                     if Path(file).suffix.lower() in audio_extensions:
                         return True
         except Exception as e:
-            logger.error(f"Ошибка проверки устройства {device_path}: {e}")
+            logger.error(f"Device check error {device_path}: {e}")
 
         return False
 
 
 if __name__ == "__main__":
-    # Тестирование модуля
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
     def on_new_device(device_path):
-        print(f"\n🔌 Новое устройство подключено: {device_path}")
+        print(f"\nNew device connected: {device_path}")
 
-        # Получаем информацию об устройстве
         device_info = USBMonitor.get_device_info(device_path)
-        print(f"   Уникальный ID: {device_info['unique_id']}")
+        print(f"   Unique ID: {device_info['unique_id']}")
         if device_info['label']:
-            print(f"   Метка: {device_info['label']}")
+            print(f"   Label: {device_info['label']}")
         if device_info['uuid']:
             print(f"   UUID: {device_info['uuid']}")
         if device_info['serial']:
             print(f"   Serial: {device_info['serial']}")
 
         if USBMonitor.is_audio_recorder(device_path):
-            print(f"✅ Это аудио диктофон!")
+            print(f"This is an audio recorder!")
         else:
-            print(f"❌ Аудио файлы не найдены")
+            print(f"No audio files found")
 
     monitor = USBMonitor(check_interval=3)
     monitor.monitor(callback=on_new_device)
